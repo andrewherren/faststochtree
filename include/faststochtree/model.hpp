@@ -9,6 +9,7 @@ namespace bart {
 
 struct BARTConfig {
     int   num_trees        = 200;
+    int   tree_depth       = 6;      // max leaf depth; tree has 2^depth leaf slots
     int   min_samples_leaf = 5;
     float alpha            = 0.95f;  // BART tree prior: P(split at depth d) = alpha/(1+d)^beta
     float beta             = 2.0f;
