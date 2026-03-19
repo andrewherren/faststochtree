@@ -180,23 +180,34 @@ void sample_leaves(Tree& tree, const float* resid,
                    int n, float sigma2, const BARTConfig& cfg, RNG& rng,
                    const std::vector<int>& leaf_idx) {
     float tau = cfg.leaf_prior_var;
-    int   sz  = tree.full_size + 1;  // 128 for depth=6: fits easily in L1
+    int   sz  = tree.full_size + 1;  // 128 for depth=6
 
-    // Flat scatter buffers — replace unordered_map with fixed-size arrays
-    std::vector<float> sum_buf(sz, 0.f);
-    std::vector<int>   cnt_buf(sz, 0);
+    // v9: K=4 independent scatter lanes break store-forwarding stalls when
+    // consecutive observations share a leaf. Lane arrays live on the stack
+    // (128×4×8 bytes = 4 KB) and stay hot in L1.
+    float s0[128]={}, s1[128]={}, s2[128]={}, s3[128]={};
+    int   c0[128]={}, c1[128]={}, c2[128]={}, c3[128]={};
 
-    // Fused scatter: one pass over leaf_idx and resid
-    for (int i = 0; i < n; i++) {
+    int n4 = (n / 4) * 4;
+    for (int i = 0; i < n4; i += 4) {
+        int l0 = leaf_idx[i],   l1 = leaf_idx[i+1],
+            l2 = leaf_idx[i+2], l3 = leaf_idx[i+3];
+        s0[l0] += resid[i];   c0[l0]++;
+        s1[l1] += resid[i+1]; c1[l1]++;
+        s2[l2] += resid[i+2]; c2[l2]++;
+        s3[l3] += resid[i+3]; c3[l3]++;
+    }
+    for (int i = n4; i < n; i++) {
         int k = leaf_idx[i];
-        sum_buf[k] += resid[i];
-        cnt_buf[k]++;
+        s0[k] += resid[i]; c0[k]++;
     }
 
     for (int k = 1; k < sz; k++) {
-        if (cnt_buf[k] == 0) continue;
-        float post_mean = (tau * sum_buf[k]) / (cnt_buf[k] * tau + sigma2);
-        float post_var  = (tau * sigma2)      / (cnt_buf[k] * tau + sigma2);
+        int   cnt = c0[k] + c1[k] + c2[k] + c3[k];
+        if (cnt == 0) continue;
+        float sum = s0[k] + s1[k] + s2[k] + s3[k];
+        float post_mean = (tau * sum) / (cnt * tau + sigma2);
+        float post_var  = (tau * sigma2) / (cnt * tau + sigma2);
         tree.leaf_value[k] = post_mean + std::sqrt(post_var) * rng.normal();
     }
 }
