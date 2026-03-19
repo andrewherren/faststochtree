@@ -5,41 +5,24 @@
 namespace bart {
 
 // -----------------------------------------------------------------------
-// Helpers: gather per-node statistics by re-traversing all observations.
-// Deliberately O(n * depth) — not optimized until v7.
-// -----------------------------------------------------------------------
-
-static void node_stats(const Tree& tree, int target_k,
-                       const QuantizedX& Xq, const float* resid, int n,
-                       float& sum_y, int& count) {
-    sum_y = 0.f; count = 0;
-    for (int i = 0; i < n; i++) {
-        if (tree.traverse(Xq.data.data(), i, Xq.n) == target_k) {
-            sum_y += resid[i];
-            count++;
-        }
-    }
-}
-
-// -----------------------------------------------------------------------
-// Grow proposal
+// Grow proposal — uses cached leaf_idx; updates cache on acceptance
 // -----------------------------------------------------------------------
 
 static void propose_grow(Tree& tree, const QuantizedX& Xq, const float* resid,
                          int n, float sigma2,
                          const BARTConfig& cfg, RNG& rng,
-                         float prob_grow) {
+                         float prob_grow, std::vector<int>& leaf_idx) {
     auto ls         = tree.leaves();
     int  num_leaves = (int)ls.size();
 
     int lk = ls[rng.randint(0, num_leaves)];
-    if (lk > tree.half_size) return;  // bottom-level leaf, can't grow
+    if (lk > tree.half_size) return;
     int leaf_depth = Tree::depth_of(lk);
     int var        = rng.randint(0, Xq.p);
 
     uint8_t var_min = 255, var_max = 0;
     for (int i = 0; i < n; i++) {
-        if (tree.traverse(Xq.data.data(), i, Xq.n) == lk) {
+        if (leaf_idx[i] == lk) {
             uint8_t v = Xq.at(i, var);
             if (v < var_min) var_min = v;
             if (v > var_max) var_max = v;
@@ -52,7 +35,7 @@ static void propose_grow(Tree& tree, const QuantizedX& Xq, const float* resid,
     float left_sum = 0.f, right_sum = 0.f, node_sum = 0.f;
     int   left_n   = 0,   right_n   = 0,   node_n   = 0;
     for (int i = 0; i < n; i++) {
-        if (tree.traverse(Xq.data.data(), i, Xq.n) == lk) {
+        if (leaf_idx[i] == lk) {
             node_sum += resid[i]; node_n++;
             if (Xq.at(i, var) <= threshold) { left_sum  += resid[i]; left_n++;  }
             else                             { right_sum += resid[i]; right_n++; }
@@ -84,18 +67,23 @@ static void propose_grow(Tree& tree, const QuantizedX& Xq, const float* resid,
 
     if (log_mh > 0.f) log_mh = 0.f;
 
-    if (std::log(rng.uniform()) <= log_mh)
+    if (std::log(rng.uniform()) <= log_mh) {
         tree.grow(lk, var, threshold);
+        // Update cache: obs at lk routed to left (2*lk) or right (2*lk+1)
+        for (int i = 0; i < n; i++)
+            if (leaf_idx[i] == lk)
+                leaf_idx[i] = 2*lk + (Xq.at(i, var) > threshold ? 1 : 0);
+    }
 }
 
 // -----------------------------------------------------------------------
-// Prune proposal
+// Prune proposal — uses cached leaf_idx; updates cache on acceptance
 // -----------------------------------------------------------------------
 
-static void propose_prune(Tree& tree, const QuantizedX& Xq, const float* resid,
+static void propose_prune(Tree& tree, const float* resid,
                           int n, float sigma2,
                           const BARTConfig& cfg, RNG& rng,
-                          float prob_prune) {
+                          float prob_prune, std::vector<int>& leaf_idx) {
     auto lps        = tree.leaf_parents();
     int  num_lp     = (int)lps.size();
     int  num_leaves = (int)tree.leaves().size();
@@ -105,10 +93,12 @@ static void propose_prune(Tree& tree, const QuantizedX& Xq, const float* resid,
     int right_child = 2 * pk + 1;
     int leaf_depth  = Tree::depth_of(pk);
 
-    float left_sum, right_sum;
-    int   left_n,   right_n;
-    node_stats(tree, left_child,  Xq, resid, n, left_sum,  left_n);
-    node_stats(tree, right_child, Xq, resid, n, right_sum, right_n);
+    float left_sum = 0.f, right_sum = 0.f;
+    int   left_n   = 0,   right_n   = 0;
+    for (int i = 0; i < n; i++) {
+        if      (leaf_idx[i] == left_child)  { left_sum  += resid[i]; left_n++;  }
+        else if (leaf_idx[i] == right_child) { right_sum += resid[i]; right_n++; }
+    }
     float node_sum = left_sum + right_sum;
     int   node_n   = left_n   + right_n;
 
@@ -132,26 +122,32 @@ static void propose_prune(Tree& tree, const QuantizedX& Xq, const float* resid,
 
     if (log_mh > 0.f) log_mh = 0.f;
 
-    if (std::log(rng.uniform()) <= log_mh)
+    if (std::log(rng.uniform()) <= log_mh) {
         tree.prune(pk);
+        // Update cache: obs at 2*pk and 2*pk+1 merge back to pk
+        for (int i = 0; i < n; i++)
+            if (leaf_idx[i] == left_child || leaf_idx[i] == right_child)
+                leaf_idx[i] = pk;
+    }
 }
 
 // -----------------------------------------------------------------------
-// One tree update step: decide grow vs prune, then execute
+// One tree update step
 // -----------------------------------------------------------------------
 
 static void propose_move(Tree& tree, const QuantizedX& Xq, const float* resid,
                          int n, float sigma2,
-                         const BARTConfig& cfg, RNG& rng) {
+                         const BARTConfig& cfg, RNG& rng,
+                         std::vector<int>& leaf_idx) {
     auto ls  = tree.leaves();
     auto lps = tree.leaf_parents();
 
     bool grow_possible = false;
     for (int lk : ls) {
-        if (lk > tree.half_size) continue;  // bottom-level, can't grow
+        if (lk > tree.half_size) continue;
         int cnt = 0;
         for (int i = 0; i < n; i++)
-            if (tree.traverse(Xq.data.data(), i, Xq.n) == lk) cnt++;
+            if (leaf_idx[i] == lk) cnt++;
         if (cnt >= 2 * cfg.min_samples_leaf) { grow_possible = true; break; }
     }
     bool prune_possible = !lps.empty();
@@ -162,9 +158,9 @@ static void propose_move(Tree& tree, const QuantizedX& Xq, const float* resid,
     float prob_prune = prune_possible ? (grow_possible  ? 0.5f : 1.0f) : 0.0f;
 
     if (rng.uniform() < prob_grow)
-        propose_grow(tree,  Xq, resid, n, sigma2, cfg, rng, prob_grow);
+        propose_grow(tree,  Xq, resid, n, sigma2, cfg, rng, prob_grow,  leaf_idx);
     else
-        propose_prune(tree, Xq, resid, n, sigma2, cfg, rng, prob_prune);
+        propose_prune(tree,     resid, n, sigma2, cfg, rng, prob_prune, leaf_idx);
 }
 
 // -----------------------------------------------------------------------
@@ -180,14 +176,15 @@ void sample_sigma2(const float* resid, int n, float& sigma2,
     sigma2 = scale / rng.gamma(shape);
 }
 
-void sample_leaves(Tree& tree, const QuantizedX& Xq, const float* resid,
-                   int n, float sigma2, const BARTConfig& cfg, RNG& rng) {
+void sample_leaves(Tree& tree, const float* resid,
+                   int n, float sigma2, const BARTConfig& cfg, RNG& rng,
+                   const std::vector<int>& leaf_idx) {
     float tau = cfg.leaf_prior_var;
 
     std::unordered_map<int, float> sum_map;
     std::unordered_map<int, int>   cnt_map;
     for (int i = 0; i < n; i++) {
-        int k = tree.traverse(Xq.data.data(), i, Xq.n);
+        int k = leaf_idx[i];
         sum_map[k] += resid[i];
         cnt_map[k]++;
     }
@@ -205,6 +202,7 @@ void init_state(BARTState& state, const BARTConfig& cfg, RNG& rng) {
     state.trees.clear();
     for (int t = 0; t < T; t++) state.trees.emplace_back(cfg.tree_depth);
     state.pred.assign(T, std::vector<float>(state.n, 0.f));
+    state.leaf_indices.assign(T, std::vector<int>(state.n, 1));  // all at root (node 1)
     state.residual.assign(state.y, state.y + state.n);
     state.sigma2 = 1.f;
     (void)rng;
@@ -215,14 +213,14 @@ void mcmc_sweep(BARTState& s, const BARTConfig& cfg, RNG& rng) {
         for (int i = 0; i < s.n; i++) s.residual[i] += s.pred[t][i];
 
         propose_move(s.trees[t], s.Xq, s.residual.data(),
-                     s.n, s.sigma2, cfg, rng);
+                     s.n, s.sigma2, cfg, rng, s.leaf_indices[t]);
 
-        sample_leaves(s.trees[t], s.Xq, s.residual.data(),
-                      s.n, s.sigma2, cfg, rng);
+        sample_leaves(s.trees[t], s.residual.data(),
+                      s.n, s.sigma2, cfg, rng, s.leaf_indices[t]);
 
+        // Pred update: direct lookup — no traversal
         for (int i = 0; i < s.n; i++)
-            s.pred[t][i] = s.trees[t].leaf_value[
-                s.trees[t].traverse(s.Xq.data.data(), i, s.n)];
+            s.pred[t][i] = s.trees[t].leaf_value[s.leaf_indices[t][i]];
         for (int i = 0; i < s.n; i++) s.residual[i] -= s.pred[t][i];
     }
     sample_sigma2(s.residual.data(), s.n, s.sigma2, cfg, rng);
