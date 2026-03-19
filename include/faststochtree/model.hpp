@@ -2,7 +2,9 @@
 #include "faststochtree/tree.hpp"
 #include "faststochtree/quantize.hpp"
 #include "faststochtree/rng.hpp"
+#include "faststochtree/thread_pool.hpp"
 #include <cstring>
+#include <memory>
 #include <vector>
 #include <cmath>
 
@@ -18,6 +20,7 @@ struct BARTConfig {
     float sigma2_shape     = 3.0f;   // nu:     IG(nu/2, nu*lambda/2) prior on sigma2
     float sigma2_scale     = 1.0f;   // lambda
     int   p_eval           = 0;      // features evaluated per node: 0 = all p (gfr-v5)
+    int   num_threads      = 1;      // thread pool size for GFR parallelism (gfr-v6/v7)
 };
 
 // Pre-allocated scratch workspace — one per BARTState, reused every sweep.
@@ -53,6 +56,7 @@ struct BARTState {
     float                           sigma2;
     Workspace                       ws;
     PresortedX                      presorted;     // built by init_gfr; empty for MCMC-only use
+    std::unique_ptr<ThreadPool>     thread_pool;   // optional; built by run_xbart for num_threads>1
 };
 
 // Reduced log marginal likelihood for a Gaussian constant leaf.
