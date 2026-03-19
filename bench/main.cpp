@@ -51,7 +51,7 @@ int main(int argc, char** argv) {
 
     bart::RNG model_rng(seed + 1);
 
-    printf("faststochtree BART benchmark (v8-scatter-buffer)\n");
+    printf("faststochtree BART benchmark (v9-multilane)\n");
     printf("  n_train=%d  n_test=%d  p=%d  trees=%d\n",
            n_train, n_test, p, num_trees);
     printf("  burnin=%d  samples=%d  sigma_true=%.2f\n",
