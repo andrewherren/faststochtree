@@ -93,6 +93,19 @@ struct Tree {
             if (!is_leaf(k) && is_leaf(2*k) && is_leaf(2*k+1)) r.push_back(k);
         return r;
     }
+
+    // Out-parameter variants — write into pre-allocated buffer (no heap alloc).
+    void leaves(std::vector<int>& out) const {
+        out.clear();
+        for (int k = 1; k <= full_size; k++)
+            if (is_leaf(k)) out.push_back(k);
+    }
+
+    void leaf_parents(std::vector<int>& out) const {
+        out.clear();
+        for (int k = 1; k <= half_size; k++)
+            if (!is_leaf(k) && is_leaf(2*k) && is_leaf(2*k+1)) out.push_back(k);
+    }
 };
 
 } // namespace bart
