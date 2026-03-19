@@ -49,3 +49,4 @@ build-*/
 # IDE files
 .vscode
 compile_commands.json
+.cache/
