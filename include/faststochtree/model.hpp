@@ -5,6 +5,7 @@
 #include "faststochtree/thread_pool.hpp"
 #include <cstring>
 #include <memory>
+#include <numeric>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -39,27 +40,40 @@ struct Workspace {
     std::vector<float> zeros;
 };
 
-// Pre-sorted observation indices — argsort by each feature, built once.
-// Reused across all tree rebuilds in GFR/XBART sweeps.
-struct PresortedX {
-    std::vector<std::vector<int>> sorted_idx;  // [p][n]: sorted obs indices per feature
-    void build(const QuantizedX& Xq, int n, int p);
-};
+// Persistent workspace for gfr-v9 histogram-based GFR.
+// Replace the O(n*p) presorted copies with:
+//   - A single flat_obs list (unordered, partitioned in-place)
+//   - Per-node 256-bin sum/count histograms for all m features
+//
+// Per-node cost: O(n_k * m) histogram build + O(256 * m) prefix scan +
+//                O(n_k) single obs-list partition.  No sorted-order copy needed.
+struct GFRHistWorkspace {
+    std::vector<int>     flat_obs;        // [n] obs indices, partitioned in-place
+    std::unordered_map<int, std::pair<int,int>> node_range;  // node_k → {beg,end}
 
-// Per-tree mutable copy of sorted_idx with [beg,end) range tracking per node.
-// Stored persistently in BARTState (gfr-v8) so working/ranges memory is
-// allocated once and reused across all tree rebuilds.
-struct TreePartition {
-    std::vector<std::vector<int>>                           working;  // [p][n]
-    std::vector<std::unordered_map<int,std::pair<int,int>>> ranges;   // [p][node→{beg,end}]
+    std::vector<float>   sum_hists;       // [m_max * 256]: fi*256 + bin
+    std::vector<int>     cnt_hists;       // [m_max * 256]
+    std::vector<float>   feat_log_total;  // [m_max + 1]
+    std::vector<float>   cut_log_wts;     // stage-2 candidate log-weights (≤255)
+    std::vector<uint8_t> cut_thresh_buf;  // stage-2 candidate thresholds  (≤255)
+    std::vector<int>     right_buf;       // partition scratch
+    std::vector<int>     feat_order;      // [p] Fisher-Yates scratch
 
-    // Reinitialise for a new tree rebuild.  On first call: allocates and copies.
-    // On subsequent calls: reuses existing vector capacity (no malloc), copies data.
-    void reinit(const PresortedX& ps, int n, int p) {
-        working.resize(p);
-        for (int j = 0; j < p; j++) working[j] = ps.sorted_idx[j];
-        ranges.resize(p);
-        for (int j = 0; j < p; j++) { ranges[j].clear(); ranges[j].emplace(1, std::make_pair(0, n)); }
+    void alloc(int n, int p) {
+        flat_obs.resize(n);
+        sum_hists.resize(p * 256);
+        cnt_hists.resize(p * 256);
+        feat_log_total.resize(p + 1);
+        cut_log_wts.reserve(255);
+        cut_thresh_buf.reserve(255);
+        right_buf.reserve(n);
+        feat_order.resize(p);
+    }
+
+    void reinit(int n) {
+        std::iota(flat_obs.begin(), flat_obs.end(), 0);
+        node_range.clear();
+        node_range.emplace(1, std::make_pair(0, n));
     }
 };
 
@@ -74,8 +88,7 @@ struct BARTState {
     std::vector<float>              residual;      // partial residual
     float                           sigma2;
     Workspace                       ws;
-    PresortedX                      presorted;       // built by init_gfr; empty for MCMC-only use
-    TreePartition                   gfr_partition;   // persistent GFR workspace (gfr-v8)
+    GFRHistWorkspace                gfr_hist_ws;     // persistent GFR workspace (gfr-v9)
     std::unique_ptr<ThreadPool>     thread_pool;     // optional; built by run_xbart for num_threads>1
 };
 
