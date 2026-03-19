@@ -30,8 +30,11 @@ struct Tree {
         : depth(depth_),
           half_size((1 << depth_) - 1),
           full_size((1 << (depth_ + 1)) - 1),
-          split_var(half_size + 1, 0),
-          threshold(half_size + 1, 0),
+          // Size all three arrays to full_size+1 so the branchless traverse
+          // can safely read split_var[k] for any k in [1, full_size].
+          // Always-leaf slots (k > half_size) stay 0 and never get written.
+          split_var(full_size + 1, 0),
+          threshold(full_size + 1, 0),
           leaf_value(full_size + 1, 0.f) {}
 
     bool is_leaf(int k) const { return k > half_size || split_var[k] == 0; }
@@ -44,11 +47,16 @@ struct Tree {
     }
 
     // Traverse observation i (column-major Xq[j*n+i]); returns leaf node index.
+    // Branchless fixed-iteration form: compiles to cmov, no data-dependent branches.
+    // var = (split_var[k]-1)*is_split keeps the feature index 0 when not splitting,
+    // ensuring the Xq load always reads a valid column address.
     int traverse(const uint8_t* Xq, int i, int n) const {
         int k = 1;
-        while (k <= half_size && split_var[k] != 0) {
-            int var = split_var[k] - 1;
-            k = 2*k + (Xq[var * n + i] > threshold[k] ? 1 : 0);
+        for (int d = 0; d < depth; d++) {
+            int is_split = (k <= half_size) & (split_var[k] != 0);
+            int var      = (split_var[k] - 1) * is_split;  // 0 if not split
+            int go_right = is_split & (Xq[var * n + i] > threshold[k]);
+            k            = is_split ? (2 * k + go_right) : k;
         }
         return k;
     }
