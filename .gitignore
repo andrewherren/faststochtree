@@ -40,5 +40,11 @@
 # debug information files
 *.dwo
 
+# Build directories
+build-*/
+
 # Local agent notes and planning
 .claude/
+
+# IDE files
+.vscode
