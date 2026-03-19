@@ -75,15 +75,13 @@ static void update_partition(TreePartition& part, int node_k,
 }
 
 // -----------------------------------------------------------------------
-// grow_tree_gfr (v3+v4 revised) — true two-pass two-stage sampling
+// grow_tree_gfr (v5) — feature subsampling (random forest trick)
 //
-// Pass 1: stream all p features, compute per-feature log-sum-exp totals
-//         via online LSE.  No candidate storage — just p+1 floats.
-// Stage 1: softmax over p+1 totals, select feature (or no-split).
-// Pass 2: re-scan chosen feature only to collect candidates for stage-2.
+// Evaluates only m = cfg.p_eval features per node (0 = all p).
+// Features chosen via partial Fisher-Yates shuffle — O(m) amortized.
+// Reduces per-node scan from O(n_k*p) to O(n_k*m), expected speedup p/m.
 //
-// Memory per node: O(p) for totals + O(n_k) for chosen feature's candidates.
-// Also uses a gather buffer (size n) to enable sequential prefix-sum reads.
+// Also retains v3+v4: true two-pass two-stage sampling + gather buffer.
 // -----------------------------------------------------------------------
 
 void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
@@ -94,11 +92,16 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
     TreePartition part;
     part.init(ps, n, p);
 
+    int m = (cfg.p_eval > 0 && cfg.p_eval < p) ? cfg.p_eval : p;
+
     struct FCand { uint8_t thresh; float sum_L; int count_L; };
-    std::vector<FCand>  cands_buf;    // pass-2 candidates for chosen feature
-    std::vector<float>  log_wts_buf;  // pass-2 log-weights for chosen feature
-    std::vector<float>  feat_log_total(p + 1);
+    std::vector<FCand>  cands_buf;
+    std::vector<float>  log_wts_buf;
+    std::vector<float>  feat_log_total(m + 1);
     std::vector<float>  resid_buf(n);
+    // Feature shuffle buffer — persistent across nodes to avoid per-node alloc
+    std::vector<int>    feat_order(p);
+    std::iota(feat_order.begin(), feat_order.end(), 0);
 
     std::deque<int> queue;
     queue.push_back(1);
@@ -106,6 +109,8 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
     while (!queue.empty()) {
         int node_k = queue.front(); queue.pop_front();
 
+        // Use feature 0's range for node size; if subsampling, feat_order[0] may not be 0,
+        // so always look up ranges via feat_order after the shuffle.
         auto it = part.ranges[0].find(node_k);
         if (it == part.ranges[0].end()) continue;
         auto [beg0, end0] = it->second;
@@ -117,7 +122,13 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
             continue;
         }
 
-        // Total sufficient stats from feature-0's sorted range
+        // Partial Fisher-Yates: shuffle first m entries of feat_order
+        for (int k = 0; k < m; k++) {
+            int swap = k + rng.randint(0, p - k);
+            std::swap(feat_order[k], feat_order[swap]);
+        }
+
+        // Total sufficient stats — always use feature 0's sorted range
         float sum_T = 0.f;
         const auto& w0 = part.working[0];
         for (int k = beg0; k < end0; k++) sum_T += resid[w0[k]];
@@ -132,7 +143,8 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
                   -std::numeric_limits<float>::infinity());
         int n_valid_feats = 0;
 
-        for (int j = 0; j < p; j++) {
+        for (int fi = 0; fi < m; fi++) {
+            int j = feat_order[fi];
             auto [beg_j, end_j] = part.ranges[j].at(node_k);
             const auto& w = part.working[j];
 
@@ -161,28 +173,29 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
                 }
             }
             if (sum_exp > 0.f) {
-                feat_log_total[j] = max_lw + std::log(sum_exp);
+                feat_log_total[fi] = max_lw + std::log(sum_exp);
                 n_valid_feats++;
             }
         }
 
-        // No-split weight at slot p
-        feat_log_total[p] = leaf_log_ml(sum_T, count_T, sigma2, cfg.leaf_prior_var)
+        // No-split weight at slot m
+        feat_log_total[m] = leaf_log_ml(sum_T, count_T, sigma2, cfg.leaf_prior_var)
                           - log_split_ratio
                           + (n_valid_feats > 0 ? std::log((float)n_valid_feats) : 0.f);
 
-        // Stage 1: sample feature from p+1 totals (on-the-fly exp, no feat_wts vector)
+        // Stage 1: sample feature index fi from m+1 totals
         float max_ft = *std::max_element(feat_log_total.begin(), feat_log_total.end());
         float total_ft = 0.f;
-        for (int j = 0; j <= p; j++) total_ft += std::exp(feat_log_total[j] - max_ft);
+        for (int fi = 0; fi <= m; fi++) total_ft += std::exp(feat_log_total[fi] - max_ft);
         float u1 = rng.uniform() * total_ft, cum1 = 0.f;
-        int chosen_feat = p;
-        for (int j = 0; j < p; j++) {
-            cum1 += std::exp(feat_log_total[j] - max_ft);
-            if (u1 <= cum1) { chosen_feat = j; break; }
+        int chosen_fi = m;  // default: no-split
+        for (int fi = 0; fi < m; fi++) {
+            cum1 += std::exp(feat_log_total[fi] - max_ft);
+            if (u1 <= cum1) { chosen_fi = fi; break; }
         }
+        int chosen_feat = (chosen_fi < m) ? feat_order[chosen_fi] : -1;
 
-        if (chosen_feat == p) {
+        if (chosen_feat == -1) {
             for (int j = 0; j < p; j++) part.ranges[j].erase(node_k);
             continue;
         }

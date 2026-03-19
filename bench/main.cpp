@@ -51,10 +51,11 @@ int main(int argc, char** argv) {
     cfg.leaf_prior_var = tau;
     cfg.sigma2_shape   = 3.0f;
     cfg.sigma2_scale   = sigma_true * sigma_true;
+    if (xbart) cfg.p_eval = (int)std::sqrt((float)p);  // default: sqrt(p) for XBART
 
     bart::RNG model_rng(seed + 1);
 
-    const char* tag = xbart ? "gfr-v4-pregather" : "v11-zero-alloc";
+    const char* tag = xbart ? "gfr-v5-subsampling" : "v11-zero-alloc";
     printf("faststochtree %s benchmark (%s)\n", xbart ? "XBART" : "BART", tag);
     printf("  n_train=%d  n_test=%d  p=%d  trees=%d\n",
            n_train, n_test, p, num_trees);
