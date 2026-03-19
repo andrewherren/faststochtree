@@ -2,35 +2,33 @@
 #include <vector>
 #include <cassert>
 
-// v1-naive-cpp: variable-depth tree stored as a flat node vector.
-// Children are referenced by integer index (like treelite), not by pointer.
-// Pruned children become orphaned slots in the vector — acceptable for v1.
+// v2-float: same structure as v1, double -> float throughout.
 
 namespace bart {
 
 struct Node {
-    int    split_var;   // feature index; -1 = leaf
-    double threshold;
-    double value;       // leaf prediction (used only when split_var == -1)
-    int    depth;
-    int    left;        // index into Tree::nodes; -1 if leaf
-    int    right;
+    int   split_var;   // feature index; -1 = leaf
+    float threshold;
+    float value;       // leaf prediction (used only when split_var == -1)
+    int   depth;
+    int   left;        // index into Tree::nodes; -1 if leaf
+    int   right;
 };
 
 struct Tree {
     std::vector<Node> nodes;  // nodes[0] is always the root
 
     Tree() {
-        nodes.push_back({-1, 0.0, 0.0, 0, -1, -1});  // root
+        nodes.push_back({-1, 0.f, 0.f, 0, -1, -1});  // root
     }
 
     bool is_leaf(int k) const { return nodes[k].split_var == -1; }
 
     // Traverse observation i using row-major X (X[i*p + j]); returns node index
-    int traverse(const double* X, int i, int p) const {
+    int traverse(const float* X, int i, int p) const {
         int k = 0;
         while (!is_leaf(k)) {
-            double val = X[i * p + nodes[k].split_var];
+            float val = X[i * p + nodes[k].split_var];
             k = (val <= nodes[k].threshold) ? nodes[k].left : nodes[k].right;
         }
         return k;
@@ -51,12 +49,12 @@ struct Tree {
     }
 
     // Grow leaf k into an internal node; appends two new leaf children
-    void grow(int k, int var, double threshold) {
+    void grow(int k, int var, float threshold) {
         assert(is_leaf(k));
         int li = (int)nodes.size();
-        nodes.push_back({-1, 0.0, nodes[k].value, nodes[k].depth + 1, -1, -1});
+        nodes.push_back({-1, 0.f, nodes[k].value, nodes[k].depth + 1, -1, -1});
         int ri = (int)nodes.size();
-        nodes.push_back({-1, 0.0, nodes[k].value, nodes[k].depth + 1, -1, -1});
+        nodes.push_back({-1, 0.f, nodes[k].value, nodes[k].depth + 1, -1, -1});
         // Must index nodes[k] after push_back in case of reallocation
         nodes[k].split_var  = var;
         nodes[k].threshold  = threshold;

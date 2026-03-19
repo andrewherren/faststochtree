@@ -3,8 +3,8 @@
 
 namespace bart {
 
-BARTResult run_bart(const double* X,      const double* y, int n, int p,
-                    const double* X_test, int n_test,
+BARTResult run_bart(const float* X,      const float* y, int n, int p,
+                    const float* X_test, int n_test,
                     const BARTConfig& cfg, int n_burnin, int n_samples, RNG& rng) {
     BARTState state;
     state.n = n;
@@ -14,7 +14,7 @@ BARTResult run_bart(const double* X,      const double* y, int n, int p,
 
     init_state(state, cfg, rng);
 
-    for (int s = 0; s < n_burnin;  s++) mcmc_sweep(state, cfg, rng);
+    for (int s = 0; s < n_burnin; s++) mcmc_sweep(state, cfg, rng);
 
     BARTResult result;
     result.samples.reserve(n_samples);
@@ -24,14 +24,14 @@ BARTResult run_bart(const double* X,      const double* y, int n, int p,
         mcmc_sweep(state, cfg, rng);
 
         // Training predictions: sum cached per-tree predictions
-        std::vector<double> pred(n, 0.0);
+        std::vector<float> pred(n, 0.f);
         for (int t = 0; t < cfg.num_trees; t++)
             for (int i = 0; i < n; i++)
                 pred[i] += state.pred[t][i];
         result.samples.push_back(std::move(pred));
 
         // Test predictions: traverse each test obs through each tree
-        std::vector<double> test_pred(n_test, 0.0);
+        std::vector<float> test_pred(n_test, 0.f);
         for (int t = 0; t < cfg.num_trees; t++)
             for (int i = 0; i < n_test; i++)
                 test_pred[i] += state.trees[t].nodes[
@@ -39,7 +39,7 @@ BARTResult run_bart(const double* X,      const double* y, int n, int p,
         result.test_samples.push_back(std::move(test_pred));
 
         result.sigma2_samples.push_back(state.sigma2);
-        result.forests.push_back(state.trees);  // snapshot: copies T node-vectors
+        result.forests.push_back(state.trees);
     }
 
     return result;

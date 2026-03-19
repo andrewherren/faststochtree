@@ -7,15 +7,15 @@ struct RNG {
     std::mt19937 gen;
     explicit RNG(unsigned seed = 42) : gen(seed) {}
 
-    double uniform() {
-        return std::uniform_real_distribution<double>(0.0, 1.0)(gen);
+    float uniform() {
+        return std::uniform_real_distribution<float>(0.f, 1.f)(gen);
     }
-    double normal() {
-        return std::normal_distribution<double>(0.0, 1.0)(gen);
+    float normal() {
+        return std::normal_distribution<float>(0.f, 1.f)(gen);
     }
     // Draw x ~ Gamma(shape, 1)
-    double gamma(double shape) {
-        return std::gamma_distribution<double>(shape, 1.0)(gen);
+    float gamma(float shape) {
+        return std::gamma_distribution<float>(shape, 1.f)(gen);
     }
     // Uniform integer in [lo, hi)
     int randint(int lo, int hi) {
