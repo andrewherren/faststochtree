@@ -9,233 +9,39 @@
 namespace bart {
 
 // -----------------------------------------------------------------------
-// PresortedX::build — argsort each feature once; reused across all tree
-// rebuilds in a run.  O(n*p*log n) total, amortized to O(1) per rebuild.
-// -----------------------------------------------------------------------
-
-void PresortedX::build(const QuantizedX& Xq, int n, int p) {
-    sorted_idx.resize(p);
-    std::vector<int> idx(n);
-    std::iota(idx.begin(), idx.end(), 0);
-    for (int j = 0; j < p; j++) {
-        sorted_idx[j] = idx;
-        std::sort(sorted_idx[j].begin(), sorted_idx[j].end(),
-                  [&](int a, int b) { return Xq.at(a, j) < Xq.at(b, j); });
-    }
-}
-
-// TreePartition is defined in model.hpp (gfr-v8: persistent workspace).
-
-// Parallel version of update_partition (gfr-v7).
-// Phase 1 (parallel): stable-partition working[j] for each j independently.
-//   Different j → different working[j] arrays → no data race.
-// Phase 2 (sequential): update ranges maps — O(p) map ops, negligible.
-static void update_partition_parallel(TreePartition& part, int node_k,
-                                       int feat, uint8_t thresh, int count_L,
-                                       const QuantizedX& Xq, int p,
-                                       ThreadPool& pool) {
-    std::vector<int> left_counts(p);
-
-    pool.parallel_for(0, p, [&](int j) {
-        auto [beg, end] = part.ranges[j].at(node_k);
-        auto& w = part.working[j];
-        if (j == feat) {
-            left_counts[j] = count_L;
-        } else {
-            thread_local std::vector<int> right_buf;
-            right_buf.clear();
-            int write = beg;
-            for (int k = beg; k < end; k++) {
-                int obs = w[k];
-                if (Xq.at(obs, feat) <= thresh) w[write++] = obs;
-                else right_buf.push_back(obs);
-            }
-            left_counts[j] = write - beg;
-            for (int obs : right_buf) w[write++] = obs;
-        }
-    });
-
-    for (int j = 0; j < p; j++) {
-        auto [beg, end] = part.ranges[j].at(node_k);
-        part.ranges[j][2*node_k]   = {beg, beg + left_counts[j]};
-        part.ranges[j][2*node_k+1] = {beg + left_counts[j], end};
-        part.ranges[j].erase(node_k);
-    }
-}
-
-// Stable-partition all p feature working arrays after a split at node_k.
-// For the split feature, the pre-sorted order already separates left/right.
-// For all other features, we partition in-place preserving sorted order.
-static void update_partition(TreePartition& part, int node_k,
-                              int feat, uint8_t thresh, int count_L,
-                              const QuantizedX& Xq, int p) {
-    std::vector<int> right_buf;
-    for (int j = 0; j < p; j++) {
-        auto [beg, end] = part.ranges[j].at(node_k);
-        auto& w = part.working[j];
-        if (j == feat) {
-            // Split feature: sorted array is already left|right at beg+count_L
-            part.ranges[j][2*node_k]   = {beg, beg + count_L};
-            part.ranges[j][2*node_k+1] = {beg + count_L, end};
-        } else {
-            // Other features: stable-partition by split criterion
-            right_buf.clear();
-            int write = beg;
-            for (int k = beg; k < end; k++) {
-                int obs = w[k];
-                if (Xq.at(obs, feat) <= thresh) w[write++] = obs;
-                else right_buf.push_back(obs);
-            }
-            int left_count = write - beg;
-            for (int obs : right_buf) w[write++] = obs;
-            part.ranges[j][2*node_k]   = {beg, beg + left_count};
-            part.ranges[j][2*node_k+1] = {beg + left_count, end};
-        }
-        part.ranges[j].erase(node_k);
-    }
-}
-
-// -----------------------------------------------------------------------
-// eval_node — evaluate one node's split decision.
-// Called both from the single-threaded path and the parallel path (gfr-v6).
-// All inputs are read-only on the shared partition; outputs go to NodeDecision.
-// -----------------------------------------------------------------------
-
-struct NodeDecision {
-    int     node_k;
-    int     feat;      // -1 = no split
-    uint8_t thresh;
-    int     count_L;
-};
-
-static NodeDecision eval_node(int node_k, const TreePartition& part,
-                               const QuantizedX& Xq, const float* resid,
-                               int n, int p, int m, int n_k, float sum_T,
-                               float sigma2, const BARTConfig& cfg,
-                               RNG& local_rng, int depth, ThreadPool* pool) {
-    struct FCand { uint8_t thresh; float sum_L; int count_L; };
-
-    // Fisher-Yates: per-node scratch (small, stack-friendly)
-    std::vector<int>   feat_order(p);
-    std::iota(feat_order.begin(), feat_order.end(), 0);
-    for (int k = 0; k < m; k++) {
-        int swap = k + local_rng.randint(0, p - k);
-        std::swap(feat_order[k], feat_order[swap]);
-    }
-
-    std::vector<float> feat_log_total(m + 1, -std::numeric_limits<float>::infinity());
-
-    float p_split = cfg.alpha / std::pow(1.f + depth, cfg.beta);
-    p_split = std::min(p_split, 1.f - 1e-6f);
-    float log_split_ratio = std::log(p_split) - std::log(1.f - p_split);
-    int count_T = n_k;
-
-    // Pass 1: per-feature log-sum-exp totals (online LSE, no storage).
-    // Each feature slot feat_log_total[fi] is written by exactly one thread → no race.
-    auto pass1 = [&](int fi) {
-        thread_local std::vector<float> resid_buf;
-        int j = feat_order[fi];
-        auto [beg_j, end_j] = part.ranges[j].at(node_k);
-        const auto& w = part.working[j];
-        resid_buf.resize(n_k);
-        for (int k = beg_j; k < end_j; k++)
-            resid_buf[k - beg_j] = resid[w[k]];
-        float sum_L = 0.f; int count_L = 0;
-        float max_lw = -std::numeric_limits<float>::infinity(), sum_exp = 0.f;
-        for (int k = 0; k < n_k - 1; k++) {
-            sum_L += resid_buf[k]; count_L++;
-            int obs_i = w[beg_j + k];
-            if (Xq.at(obs_i, j) >= Xq.at(w[beg_j + k + 1], j)) continue;
-            int count_R = count_T - count_L;
-            if (count_L < cfg.min_samples_leaf || count_R < cfg.min_samples_leaf) continue;
-            float log_ml = leaf_log_ml(sum_L, count_L, sigma2, cfg.leaf_prior_var)
-                         + leaf_log_ml(sum_T - sum_L, count_R, sigma2, cfg.leaf_prior_var);
-            if (log_ml > max_lw) { sum_exp = sum_exp * std::exp(max_lw - log_ml) + 1.f; max_lw = log_ml; }
-            else sum_exp += std::exp(log_ml - max_lw);
-        }
-        if (sum_exp > 0.f) feat_log_total[fi] = max_lw + std::log(sum_exp);
-    };
-
-    bool par_scan = pool && ((long)m * n_k > 200'000L);
-    if (par_scan) pool->parallel_for(0, m, pass1);
-    else          for (int fi = 0; fi < m; fi++) pass1(fi);
-
-    int n_valid_feats = 0;
-    for (int fi = 0; fi < m; fi++)
-        if (feat_log_total[fi] > -std::numeric_limits<float>::infinity()) n_valid_feats++;
-
-    feat_log_total[m] = leaf_log_ml(sum_T, count_T, sigma2, cfg.leaf_prior_var)
-                      - log_split_ratio
-                      + (n_valid_feats > 0 ? std::log((float)n_valid_feats) : 0.f);
-
-    // Stage 1: sample feature
-    float max_ft = *std::max_element(feat_log_total.begin(), feat_log_total.end());
-    float total_ft = 0.f;
-    for (int fi = 0; fi <= m; fi++) total_ft += std::exp(feat_log_total[fi] - max_ft);
-    float u1 = local_rng.uniform() * total_ft, cum1 = 0.f;
-    int chosen_fi = m;
-    for (int fi = 0; fi < m; fi++) {
-        cum1 += std::exp(feat_log_total[fi] - max_ft);
-        if (u1 <= cum1) { chosen_fi = fi; break; }
-    }
-    if (chosen_fi == m) return {node_k, -1, 0, 0};  // no split
-    int chosen_feat = feat_order[chosen_fi];
-
-    // Pass 2: re-scan chosen feature, collect candidates for stage-2
-    std::vector<FCand>  cands;
-    std::vector<float>  log_wts;
-    {
-        thread_local std::vector<float> resid_buf;
-        auto [beg_j, end_j] = part.ranges[chosen_feat].at(node_k);
-        const auto& w = part.working[chosen_feat];
-        resid_buf.resize(n_k);
-        for (int k = beg_j; k < end_j; k++) resid_buf[k - beg_j] = resid[w[k]];
-        float sum_L = 0.f; int count_L = 0;
-        for (int k = 0; k < n_k - 1; k++) {
-            sum_L += resid_buf[k]; count_L++;
-            int obs_i = w[beg_j + k];
-            if (Xq.at(obs_i, chosen_feat) >= Xq.at(w[beg_j + k + 1], chosen_feat)) continue;
-            int count_R = count_T - count_L;
-            if (count_L < cfg.min_samples_leaf || count_R < cfg.min_samples_leaf) continue;
-            float log_ml = leaf_log_ml(sum_L, count_L, sigma2, cfg.leaf_prior_var)
-                         + leaf_log_ml(sum_T - sum_L, count_R, sigma2, cfg.leaf_prior_var);
-            cands.push_back({Xq.at(obs_i, chosen_feat), sum_L, count_L});
-            log_wts.push_back(log_ml);
-        }
-    }
-
-    // Stage 2: softmax over cutpoints
-    float max_lw2 = *std::max_element(log_wts.begin(), log_wts.end());
-    float total_ct = 0.f;
-    for (float lw : log_wts) total_ct += std::exp(lw - max_lw2);
-    float u2 = local_rng.uniform() * total_ct, cum2 = 0.f;
-    int chosen_cut = (int)cands.size() - 1;
-    for (int k = 0; k < (int)cands.size() - 1; k++) {
-        cum2 += std::exp(log_wts[k] - max_lw2);
-        if (u2 <= cum2) { chosen_cut = k; break; }
-    }
-    return {node_k, chosen_feat, cands[chosen_cut].thresh, cands[chosen_cut].count_L};
-}
-
-// -----------------------------------------------------------------------
-// grow_tree_gfr (v7) — level-BFS, feature-parallel evaluation and partition
+// grow_tree_gfr (v9) — 256-bin histogram GFR
 //
-// Nodes are processed sequentially within each BFS level.
-// Parallelism is applied within each node across features:
-//   • Pass 1 scan: pool->parallel_for(0, m, pass1) in eval_node
-//   • Partition update: pool->parallel_for(0, p, ...) in update_partition_parallel
+// Key design changes vs v8:
+//   1. No PresortedX / TreePartition.  A single flat_obs list (unordered)
+//      is partitioned in-place at each split — O(n_k), not O(n_k * p).
+//   2. Per-node histogram scan: for each of the m sampled features build
+//      a 256-bin sum/count histogram in O(n_k), then prefix-scan in O(256)
+//      to compute the feature's log-total and collect stage-2 candidates.
+//      Total per-node: O(n_k * m + 256 * m) vs O(n_k * m) previously,
+//      but the constant is far smaller (cache-friendly linear scan).
+//   3. Stage 1 (feature sampling) + Stage 2 (cutpoint sampling) are now
+//      fused: a single histogram pass builds both the feature log-total
+//      (used in stage 1) and records per-bin log-weights for stage 2.
+//      For the chosen feature a second prefix-scan (O(256)) replaces the
+//      pass-2 re-scan over sorted obs.
+//   4. ws is a persistent GFRHistWorkspace — no per-call heap allocation.
 //
-// Both operations are safe to parallelize — each feature owns its own array.
-// pool=nullptr → single-threaded fallback.
+// Parallelism: pool->parallel_for(0, m, hist_build) when m*n_k > 200,000.
+//   Each feature fi owns ws.sum_hists[fi*256..] and ws.cnt_hists[fi*256..]
+//   → no data race.  Stage 1/2 softmax and obs-list partition are sequential.
 // -----------------------------------------------------------------------
 
 void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
                    int n, int p, float sigma2, const BARTConfig& cfg, RNG& rng,
-                   const PresortedX& ps, TreePartition& part, ThreadPool* pool) {
+                   GFRHistWorkspace& ws, ThreadPool* pool) {
     tree.reset();
-    part.reinit(ps, n, p);
+    ws.reinit(n);
 
     int m = (cfg.p_eval > 0 && cfg.p_eval < p) ? cfg.p_eval : p;
+
+    // feat_order scratch — reused each node via Fisher-Yates
+    ws.feat_order.resize(p);
+    std::iota(ws.feat_order.begin(), ws.feat_order.end(), 0);
 
     std::vector<int> current_level = {1};
 
@@ -243,34 +49,164 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
         std::vector<int> next_level;
 
         for (int node_k : current_level) {
-            auto it = part.ranges[0].find(node_k);
-            if (it == part.ranges[0].end()) continue;
-            auto [beg0, end0] = it->second;
-            int n_k = end0 - beg0;
+            auto it = ws.node_range.find(node_k);
+            if (it == ws.node_range.end()) continue;
+            int beg = it->second.first, end = it->second.second;
+            int n_k = end - beg;
             int depth = Tree::depth_of(node_k);
+
             if (n_k < 2 * cfg.min_samples_leaf || depth >= tree.depth - 1) {
-                for (int j = 0; j < p; j++) part.ranges[j].erase(node_k);
+                ws.node_range.erase(it);
                 continue;
             }
+
+            // Compute total residual sum for this node
             float sum_T = 0.f;
-            const auto& w0 = part.working[0];
-            for (int k = beg0; k < end0; k++) sum_T += resid[w0[k]];
+            for (int k = beg; k < end; k++) sum_T += resid[ws.flat_obs[k]];
+            int count_T = n_k;
 
+            // Fisher-Yates shuffle first m of feat_order
+            // Restore canonical order first (reuse the same vector)
+            std::iota(ws.feat_order.begin(), ws.feat_order.end(), 0);
             RNG local_rng(rng.randint(0, INT_MAX));
-            NodeDecision d = eval_node(node_k, part, Xq, resid, n, p, m,
-                                       n_k, sum_T, sigma2, cfg, local_rng, depth, pool);
-            if (d.feat == -1) continue;
+            for (int k = 0; k < m; k++) {
+                int swap = k + local_rng.randint(0, p - k);
+                std::swap(ws.feat_order[k], ws.feat_order[swap]);
+            }
 
-            tree.grow(d.node_k, d.feat, d.thresh);
+            float p_split = cfg.alpha / std::pow(1.f + depth, cfg.beta);
+            p_split = std::min(p_split, 1.f - 1e-6f);
+            float log_split_ratio = std::log(p_split) - std::log(1.f - p_split);
 
-            // Partition update: parallelize across p features when work is large
-            if (pool && (long)n_k * p > 500'000L)
-                update_partition_parallel(part, d.node_k, d.feat, d.thresh, d.count_L, Xq, p, *pool);
-            else
-                update_partition(part, d.node_k, d.feat, d.thresh, d.count_L, Xq, p);
+            // Initialise feat_log_total to -inf
+            const float NEG_INF = -std::numeric_limits<float>::infinity();
+            for (int fi = 0; fi <= m; fi++) ws.feat_log_total[fi] = NEG_INF;
 
-            next_level.push_back(2 * d.node_k);
-            next_level.push_back(2 * d.node_k + 1);
+            // ---------------------------------------------------------------
+            // hist_build lambda: for feature fi build histogram then prefix-
+            // scan to compute feat_log_total[fi].
+            // Each fi owns a contiguous 256-element slice → no race.
+            // ---------------------------------------------------------------
+            auto hist_build = [&](int fi) {
+                int j = ws.feat_order[fi];
+                float* sh = ws.sum_hists.data() + fi * 256;
+                int*   ch = ws.cnt_hists.data() + fi * 256;
+                std::fill(sh, sh + 256, 0.f);
+                std::fill(ch, ch + 256, 0);
+
+                // Build histogram over obs in [beg, end)
+                for (int k = beg; k < end; k++) {
+                    int obs = ws.flat_obs[k];
+                    uint8_t bin = Xq.at(obs, j);
+                    sh[bin] += resid[obs];
+                    ch[bin]++;
+                }
+
+                // Prefix scan: online LSE over valid split points
+                float sum_L = 0.f; int count_L = 0;
+                float max_lw = NEG_INF, sum_exp = 0.f;
+                for (int b = 0; b < 255; b++) {
+                    if (ch[b] == 0) continue;
+                    sum_L += sh[b]; count_L += ch[b];
+                    int count_R = count_T - count_L;
+                    if (count_L < cfg.min_samples_leaf || count_R < cfg.min_samples_leaf) continue;
+                    float log_ml = leaf_log_ml(sum_L, count_L, sigma2, cfg.leaf_prior_var)
+                                 + leaf_log_ml(sum_T - sum_L, count_R, sigma2, cfg.leaf_prior_var);
+                    if (log_ml > max_lw) { sum_exp = sum_exp * std::exp(max_lw - log_ml) + 1.f; max_lw = log_ml; }
+                    else sum_exp += std::exp(log_ml - max_lw);
+                }
+                if (sum_exp > 0.f) ws.feat_log_total[fi] = max_lw + std::log(sum_exp);
+            };
+
+            bool par_hist = pool && ((long)m * n_k > 200'000L);
+            if (par_hist) pool->parallel_for(0, m, hist_build);
+            else          for (int fi = 0; fi < m; fi++) hist_build(fi);
+
+            // ---------------------------------------------------------------
+            // Stage 1: softmax over features + no-split
+            // ---------------------------------------------------------------
+            int n_valid_feats = 0;
+            for (int fi = 0; fi < m; fi++)
+                if (ws.feat_log_total[fi] > NEG_INF) n_valid_feats++;
+
+            ws.feat_log_total[m] = leaf_log_ml(sum_T, count_T, sigma2, cfg.leaf_prior_var)
+                                  - log_split_ratio
+                                  + (n_valid_feats > 0 ? std::log((float)n_valid_feats) : 0.f);
+
+            float max_ft = *std::max_element(ws.feat_log_total.data(), ws.feat_log_total.data() + m + 1);
+            float total_ft = 0.f;
+            for (int fi = 0; fi <= m; fi++) total_ft += std::exp(ws.feat_log_total[fi] - max_ft);
+            float u1 = local_rng.uniform() * total_ft, cum1 = 0.f;
+            int chosen_fi = m;
+            for (int fi = 0; fi < m; fi++) {
+                cum1 += std::exp(ws.feat_log_total[fi] - max_ft);
+                if (u1 <= cum1) { chosen_fi = fi; break; }
+            }
+            if (chosen_fi == m) {
+                ws.node_range.erase(it);
+                continue;  // no split
+            }
+            int chosen_feat = ws.feat_order[chosen_fi];
+
+            // ---------------------------------------------------------------
+            // Stage 2: softmax over cutpoints using histogram of chosen_feat
+            // Histogram already built in hist_build — re-scan in O(256).
+            // ---------------------------------------------------------------
+            ws.cut_log_wts.clear();
+            ws.cut_thresh_buf.clear();
+            {
+                float* sh = ws.sum_hists.data() + chosen_fi * 256;
+                int*   ch = ws.cnt_hists.data() + chosen_fi * 256;
+                float sum_L = 0.f; int count_L = 0;
+                for (int b = 0; b < 255; b++) {
+                    if (ch[b] == 0) continue;
+                    sum_L += sh[b]; count_L += ch[b];
+                    int count_R = count_T - count_L;
+                    if (count_L < cfg.min_samples_leaf || count_R < cfg.min_samples_leaf) continue;
+                    float log_ml = leaf_log_ml(sum_L, count_L, sigma2, cfg.leaf_prior_var)
+                                 + leaf_log_ml(sum_T - sum_L, count_R, sigma2, cfg.leaf_prior_var);
+                    ws.cut_log_wts.push_back(log_ml);
+                    ws.cut_thresh_buf.push_back((uint8_t)b);
+                }
+            }
+
+            if (ws.cut_thresh_buf.empty()) {
+                ws.node_range.erase(it);
+                continue;  // degenerate: all obs in one bin
+            }
+
+            float max_lw2 = *std::max_element(ws.cut_log_wts.begin(), ws.cut_log_wts.end());
+            float total_ct = 0.f;
+            for (float lw : ws.cut_log_wts) total_ct += std::exp(lw - max_lw2);
+            float u2 = local_rng.uniform() * total_ct, cum2 = 0.f;
+            int chosen_cut = (int)ws.cut_thresh_buf.size() - 1;
+            for (int k = 0; k < (int)ws.cut_thresh_buf.size() - 1; k++) {
+                cum2 += std::exp(ws.cut_log_wts[k] - max_lw2);
+                if (u2 <= cum2) { chosen_cut = k; break; }
+            }
+            uint8_t thresh = ws.cut_thresh_buf[chosen_cut];
+
+            // ---------------------------------------------------------------
+            // Grow tree node + O(n_k) obs-list partition
+            // ---------------------------------------------------------------
+            tree.grow(node_k, chosen_feat, thresh);
+
+            ws.right_buf.clear();
+            int write = beg;
+            for (int k = beg; k < end; k++) {
+                int obs = ws.flat_obs[k];
+                if (Xq.at(obs, chosen_feat) <= thresh) ws.flat_obs[write++] = obs;
+                else ws.right_buf.push_back(obs);
+            }
+            int left_end = write;
+            for (int obs : ws.right_buf) ws.flat_obs[write++] = obs;
+
+            ws.node_range.erase(it);
+            if (left_end > beg)          ws.node_range.emplace(2 * node_k,     std::make_pair(beg, left_end));
+            if (write > left_end)        ws.node_range.emplace(2 * node_k + 1, std::make_pair(left_end, end));
+
+            next_level.push_back(2 * node_k);
+            next_level.push_back(2 * node_k + 1);
         }
         current_level = std::move(next_level);
     }
@@ -288,8 +224,8 @@ void gfr_sweep(BARTState& state, const BARTConfig& cfg, RNG& rng) {
         for (int i = 0; i < n; i++) state.residual[i] += state.pred[t][i];
 
         grow_tree_gfr(state.trees[t], state.Xq, state.residual.data(),
-                      n, state.p, state.sigma2, cfg, rng, state.presorted,
-                      state.gfr_partition, state.thread_pool.get());
+                      n, state.p, state.sigma2, cfg, rng,
+                      state.gfr_hist_ws, state.thread_pool.get());
 
         // Rebuild leaf index cache — tree was rebuilt from scratch
         for (int i = 0; i < n; i++)
