@@ -33,6 +33,13 @@ struct Workspace {
     std::vector<float> zeros;
 };
 
+// Pre-sorted observation indices — argsort by each feature, built once.
+// Reused across all tree rebuilds in GFR/XBART sweeps.
+struct PresortedX {
+    std::vector<std::vector<int>> sorted_idx;  // [p][n]: sorted obs indices per feature
+    void build(const QuantizedX& Xq, int n, int p);
+};
+
 struct BARTState {
     int n, p;
     QuantizedX   Xq;    // quantized covariates (owned)
@@ -44,6 +51,7 @@ struct BARTState {
     std::vector<float>              residual;      // partial residual
     float                           sigma2;
     Workspace                       ws;
+    PresortedX                      presorted;     // built by init_gfr; empty for MCMC-only use
 };
 
 // Reduced log marginal likelihood for a Gaussian constant leaf.
