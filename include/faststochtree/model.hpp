@@ -2,6 +2,7 @@
 #include "faststochtree/tree.hpp"
 #include "faststochtree/quantize.hpp"
 #include "faststochtree/rng.hpp"
+#include <cstring>
 #include <vector>
 #include <cmath>
 
@@ -18,6 +19,17 @@ struct BARTConfig {
     float sigma2_scale     = 1.0f;   // lambda
 };
 
+// Pre-allocated scratch workspace — one per BARTState, reused every sweep.
+// Eliminates per-call heap allocations in propose_move and sample_leaves.
+struct Workspace {
+    // K=4 multilane scatter buffers for sample_leaves (depth=6: size 128)
+    float s0[128], s1[128], s2[128], s3[128];
+    int   c0[128], c1[128], c2[128], c3[128];
+    // Scratch for tree.leaves() / tree.leaf_parents() — avoid per-call alloc
+    std::vector<int> leaves_buf;
+    std::vector<int> leaf_parents_buf;
+};
+
 struct BARTState {
     int n, p;
     QuantizedX   Xq;    // quantized covariates (owned)
@@ -28,6 +40,7 @@ struct BARTState {
     std::vector<std::vector<int>>   leaf_indices;  // leaf_indices[t][i]: cached leaf node for obs i
     std::vector<float>              residual;      // partial residual
     float                           sigma2;
+    Workspace                       ws;
 };
 
 // Reduced log marginal likelihood for a Gaussian constant leaf.
@@ -43,10 +56,10 @@ void sample_sigma2(const float* resid, int n, float& sigma2,
 
 // Sample leaf values for all leaves of one tree (Gaussian posterior).
 // Uses pre-cached leaf_idx[i] instead of re-traversing.
-// pred_off[i] is added to resid[i] to form the effective partial residual
-// (eliminates the explicit restore pass in mcmc_sweep).
+// pred_off[i] is added to resid[i] to form the effective partial residual.
+// ws provides pre-allocated scatter lane buffers (zeroed on entry).
 void sample_leaves(Tree& tree, const float* resid, const float* pred_off,
                    int n, float sigma2, const BARTConfig& cfg, RNG& rng,
-                   const std::vector<int>& leaf_idx);
+                   const std::vector<int>& leaf_idx, Workspace& ws);
 
 } // namespace bart

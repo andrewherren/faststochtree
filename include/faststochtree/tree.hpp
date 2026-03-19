@@ -82,21 +82,37 @@ struct Tree {
 
     std::vector<int> leaves() const {
         std::vector<int> r;
-        std::vector<int> stack = {1};
-        while (!stack.empty()) {
-            int k = stack.back(); stack.pop_back();
-            if (is_leaf(k)) { r.push_back(k); continue; }
-            stack.push_back(2*k);
-            stack.push_back(2*k+1);
-        }
+        leaves(r);
         return r;
     }
 
     std::vector<int> leaf_parents() const {
         std::vector<int> r;
-        for (int k = 1; k <= half_size; k++)
-            if (!is_leaf(k) && is_leaf(2*k) && is_leaf(2*k+1)) r.push_back(k);
+        leaf_parents(r);
         return r;
+    }
+
+    // Out-parameter variants — write into pre-allocated buffer (no heap alloc).
+    // Traverse from root so only reachable leaves are returned. A linear scan
+    // over split_var includes phantom heap slots (split_var==0 on unreachable
+    // children of leaves), inflating num_leaves in the grow MH ratio by up to
+    // 2^depth x and causing over-acceptance of grow proposals.
+    void leaves(std::vector<int>& out) const {
+        out.clear();
+        std::vector<int> stack;
+        stack.push_back(1);
+        while (!stack.empty()) {
+            int k = stack.back(); stack.pop_back();
+            if (is_leaf(k)) { out.push_back(k); continue; }
+            stack.push_back(2*k);
+            stack.push_back(2*k+1);
+        }
+    }
+
+    void leaf_parents(std::vector<int>& out) const {
+        out.clear();
+        for (int k = 1; k <= half_size; k++)
+            if (!is_leaf(k) && is_leaf(2*k) && is_leaf(2*k+1)) out.push_back(k);
     }
 };
 
