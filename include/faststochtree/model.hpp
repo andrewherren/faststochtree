@@ -17,6 +17,7 @@ struct BARTConfig {
     float leaf_prior_var   = 1.0f;   // tau: leaf value prior is N(0, tau)
     float sigma2_shape     = 3.0f;   // nu:     IG(nu/2, nu*lambda/2) prior on sigma2
     float sigma2_scale     = 1.0f;   // lambda
+    int   p_eval           = 0;      // features evaluated per node: 0 = all p (gfr-v5)
 };
 
 // Pre-allocated scratch workspace — one per BARTState, reused every sweep.
