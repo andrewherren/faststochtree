@@ -64,6 +64,7 @@ BARTResult run_xbart(const float* X,      const float* y, int n, int p,
     state.y  = y;
 
     init_state(state, cfg, rng);
+    state.presorted.build(state.Xq, n, p);  // O(n*p*log n) — done once
 
     QuantizedX test_qx;
     if (n_test > 0 && X_test != nullptr)
