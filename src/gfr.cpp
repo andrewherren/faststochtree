@@ -75,10 +75,15 @@ static void update_partition(TreePartition& part, int node_k,
 }
 
 // -----------------------------------------------------------------------
-// grow_tree_gfr (v4) — pre-gather residuals before prefix sum
-// Gather scattered resid[w[k]] reads into a contiguous buffer first,
-// then scan sequentially — enables compiler auto-vectorisation of the
-// prefix-sum inner loop.  Buffer is O(n_k) per node, reused across p features.
+// grow_tree_gfr (v3+v4 revised) — true two-pass two-stage sampling
+//
+// Pass 1: stream all p features, compute per-feature log-sum-exp totals
+//         via online LSE.  No candidate storage — just p+1 floats.
+// Stage 1: softmax over p+1 totals, select feature (or no-split).
+// Pass 2: re-scan chosen feature only to collect candidates for stage-2.
+//
+// Memory per node: O(p) for totals + O(n_k) for chosen feature's candidates.
+// Also uses a gather buffer (size n) to enable sequential prefix-sum reads.
 // -----------------------------------------------------------------------
 
 void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
@@ -89,13 +94,11 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
     TreePartition part;
     part.init(ps, n, p);
 
-    // Per-feature candidate storage reused across nodes (avoid repeated alloc)
     struct FCand { uint8_t thresh; float sum_L; int count_L; };
-    std::vector<std::vector<FCand>> feat_cands(p);
-    std::vector<std::vector<float>> feat_log_wts(p);
-
-    // Gather buffer — sized to max node size (n); reused across features per node
-    std::vector<float> resid_buf(n);
+    std::vector<FCand>  cands_buf;    // pass-2 candidates for chosen feature
+    std::vector<float>  log_wts_buf;  // pass-2 log-weights for chosen feature
+    std::vector<float>  feat_log_total(p + 1);
+    std::vector<float>  resid_buf(n);
 
     std::deque<int> queue;
     queue.push_back(1);
@@ -124,25 +127,22 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
         p_split = std::min(p_split, 1.f - 1e-6f);
         float log_split_ratio = std::log(p_split) - std::log(1.f - p_split);
 
-        // Stage 1: compute per-feature log-sum-exp totals (one pass per feature)
-        // feat_log_total[j] = log( sum_k exp(log_ml_k) ) for valid cuts in feat j
-        // feat_log_total[p] = no-split log-weight
-        std::vector<float> feat_log_total(p + 1, -std::numeric_limits<float>::infinity());
+        // Pass 1: per-feature log-sum-exp totals via online LSE — no candidate storage
+        std::fill(feat_log_total.begin(), feat_log_total.end(),
+                  -std::numeric_limits<float>::infinity());
+        int n_valid_feats = 0;
 
         for (int j = 0; j < p; j++) {
-            feat_cands[j].clear();
-            feat_log_wts[j].clear();
-
             auto [beg_j, end_j] = part.ranges[j].at(node_k);
             const auto& w = part.working[j];
 
-            // Gather pass: scattered resid[w[k]] → contiguous resid_buf[0..n_k)
+            // Gather: scattered resid[w[k]] → contiguous resid_buf — enables vectorised prefix sum
             for (int k = beg_j; k < end_j; k++)
                 resid_buf[k - beg_j] = resid[w[k]];
 
-            // Prefix-sum pass: sequential reads from resid_buf — vectorizable
+            // Prefix sum + online LSE (single pass, no candidate storage)
             float sum_L = 0.f; int count_L = 0;
-            float max_lw = -std::numeric_limits<float>::infinity();
+            float max_lw = -std::numeric_limits<float>::infinity(), sum_exp = 0.f;
 
             for (int k = 0; k < n_k - 1; k++) {
                 sum_L += resid_buf[k]; count_L++;
@@ -152,68 +152,75 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
                 if (count_L < cfg.min_samples_leaf || count_R < cfg.min_samples_leaf) continue;
                 float log_ml = leaf_log_ml(sum_L, count_L, sigma2, cfg.leaf_prior_var)
                              + leaf_log_ml(sum_T - sum_L, count_R, sigma2, cfg.leaf_prior_var);
-                feat_cands[j].push_back({Xq.at(obs_i, j), sum_L, count_L});
-                feat_log_wts[j].push_back(log_ml);
-                if (log_ml > max_lw) max_lw = log_ml;
+                // Online LSE: update running max and shifted sum
+                if (log_ml > max_lw) {
+                    sum_exp = sum_exp * std::exp(max_lw - log_ml) + 1.f;
+                    max_lw = log_ml;
+                } else {
+                    sum_exp += std::exp(log_ml - max_lw);
+                }
             }
-
-            if (feat_cands[j].empty()) continue;
-
-            // log-sum-exp over this feature's cutpoints
-            float lse = 0.f;
-            for (float lw : feat_log_wts[j]) lse += std::exp(lw - max_lw);
-            feat_log_total[j] = max_lw + std::log(lse);
+            if (sum_exp > 0.f) {
+                feat_log_total[j] = max_lw + std::log(sum_exp);
+                n_valid_feats++;
+            }
         }
 
-        // Count valid features and compute no-split total
-        int n_valid_feats = 0;
-        for (int j = 0; j < p; j++)
-            if (!feat_cands[j].empty()) n_valid_feats++;
+        // No-split weight at slot p
+        feat_log_total[p] = leaf_log_ml(sum_T, count_T, sigma2, cfg.leaf_prior_var)
+                          - log_split_ratio
+                          + (n_valid_feats > 0 ? std::log((float)n_valid_feats) : 0.f);
 
-        float no_wt = leaf_log_ml(sum_T, count_T, sigma2, cfg.leaf_prior_var)
-                    - log_split_ratio
-                    + (n_valid_feats > 0 ? std::log((float)n_valid_feats) : 0.f);
-        feat_log_total[p] = no_wt;
-
-        // Stage 1 softmax: sample feature index from p+1 totals
+        // Stage 1: sample feature from p+1 totals (on-the-fly exp, no feat_wts vector)
         float max_ft = *std::max_element(feat_log_total.begin(), feat_log_total.end());
-        std::vector<float> feat_wts(p + 1);
         float total_ft = 0.f;
-        for (int j = 0; j <= p; j++) {
-            feat_wts[j] = std::exp(feat_log_total[j] - max_ft);
-            total_ft += feat_wts[j];
-        }
+        for (int j = 0; j <= p; j++) total_ft += std::exp(feat_log_total[j] - max_ft);
         float u1 = rng.uniform() * total_ft, cum1 = 0.f;
-        int chosen_feat = p;  // default: no-split
+        int chosen_feat = p;
         for (int j = 0; j < p; j++) {
-            cum1 += feat_wts[j];
+            cum1 += std::exp(feat_log_total[j] - max_ft);
             if (u1 <= cum1) { chosen_feat = j; break; }
         }
 
         if (chosen_feat == p) {
-            // No-split
             for (int j = 0; j < p; j++) part.ranges[j].erase(node_k);
             continue;
         }
 
-        // Stage 2: sample cutpoint within chosen feature
-        const auto& fc   = feat_cands[chosen_feat];
-        const auto& flw  = feat_log_wts[chosen_feat];
-        float max_lw2 = *std::max_element(flw.begin(), flw.end());
-        std::vector<float> cut_wts(fc.size());
-        float total_ct = 0.f;
-        for (int k = 0; k < (int)fc.size(); k++) {
-            cut_wts[k] = std::exp(flw[k] - max_lw2);
-            total_ct += cut_wts[k];
+        // Pass 2: re-scan chosen feature only — collect candidates for stage-2
+        cands_buf.clear();
+        log_wts_buf.clear();
+        {
+            auto [beg_j, end_j] = part.ranges[chosen_feat].at(node_k);
+            const auto& w = part.working[chosen_feat];
+            for (int k = beg_j; k < end_j; k++)
+                resid_buf[k - beg_j] = resid[w[k]];
+            float sum_L = 0.f; int count_L = 0;
+            for (int k = 0; k < n_k - 1; k++) {
+                sum_L += resid_buf[k]; count_L++;
+                int obs_i = w[beg_j + k];
+                if (Xq.at(obs_i, chosen_feat) >= Xq.at(w[beg_j + k + 1], chosen_feat)) continue;
+                int count_R = count_T - count_L;
+                if (count_L < cfg.min_samples_leaf || count_R < cfg.min_samples_leaf) continue;
+                float log_ml = leaf_log_ml(sum_L, count_L, sigma2, cfg.leaf_prior_var)
+                             + leaf_log_ml(sum_T - sum_L, count_R, sigma2, cfg.leaf_prior_var);
+                cands_buf.push_back({Xq.at(obs_i, chosen_feat), sum_L, count_L});
+                log_wts_buf.push_back(log_ml);
+            }
         }
+
+        // Stage 2: softmax over cutpoints of chosen feature (on-the-fly exp)
+        float max_lw2 = *std::max_element(log_wts_buf.begin(), log_wts_buf.end());
+        float total_ct = 0.f;
+        for (float lw : log_wts_buf) total_ct += std::exp(lw - max_lw2);
         float u2 = rng.uniform() * total_ct, cum2 = 0.f;
-        int chosen_cut = (int)fc.size() - 1;
-        for (int k = 0; k < (int)fc.size() - 1; k++) {
-            cum2 += cut_wts[k];
+        int chosen_cut = (int)cands_buf.size() - 1;
+        for (int k = 0; k < (int)cands_buf.size() - 1; k++) {
+            cum2 += std::exp(log_wts_buf[k] - max_lw2);
             if (u2 <= cum2) { chosen_cut = k; break; }
         }
 
-        const auto& c = fc[chosen_cut];
+        const auto& c = cands_buf[chosen_cut];
         tree.grow(node_k, chosen_feat, c.thresh);
         update_partition(part, node_k, chosen_feat, c.thresh, c.count_L, Xq, p);
         queue.push_front(2 * node_k + 1);
