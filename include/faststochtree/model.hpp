@@ -24,8 +24,9 @@ struct BARTState {
     const float* y;     // outcomes [n]
 
     std::vector<Tree>               trees;
-    std::vector<std::vector<float>> pred;     // pred[t][i]: tree t's prediction for obs i
-    std::vector<float>              residual; // partial residual
+    std::vector<std::vector<float>> pred;          // pred[t][i]: tree t's prediction for obs i
+    std::vector<std::vector<int>>   leaf_indices;  // leaf_indices[t][i]: cached leaf node for obs i
+    std::vector<float>              residual;      // partial residual
     float                           sigma2;
 };
 
@@ -40,8 +41,10 @@ inline float leaf_log_ml(float sum_y, int n, float sigma2, float tau) {
 void sample_sigma2(const float* resid, int n, float& sigma2,
                    const BARTConfig& cfg, RNG& rng);
 
-// Sample leaf values for all leaves of one tree (Gaussian posterior)
-void sample_leaves(Tree& tree, const QuantizedX& Xq, const float* resid,
-                   int n, float sigma2, const BARTConfig& cfg, RNG& rng);
+// Sample leaf values for all leaves of one tree (Gaussian posterior).
+// Uses pre-cached leaf_idx[i] instead of re-traversing.
+void sample_leaves(Tree& tree, const float* resid,
+                   int n, float sigma2, const BARTConfig& cfg, RNG& rng,
+                   const std::vector<int>& leaf_idx);
 
 } // namespace bart
