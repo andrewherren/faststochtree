@@ -33,7 +33,7 @@ BARTResult run_bart(const float* X,      const float* y, int n, int p,
         std::vector<float> pred(n, 0.f);
         for (int t = 0; t < cfg.num_trees; t++)
             for (int i = 0; i < n; i++)
-                pred[i] += state.pred[t][i];
+                pred[i] += state.pred[t][i];  // cached; no traversal needed
         result.samples.push_back(std::move(pred));
 
         // Test predictions: traverse each test obs through each tree
@@ -42,7 +42,7 @@ BARTResult run_bart(const float* X,      const float* y, int n, int p,
             for (int t = 0; t < cfg.num_trees; t++)
                 for (int i = 0; i < n_test; i++)
                     test_pred[i] += state.trees[t].nodes[
-                        state.trees[t].traverse(test_qx.data.data(), i, p)].value;
+                        state.trees[t].traverse(test_qx.data.data(), i, n_test)].value;
             result.test_samples.push_back(std::move(test_pred));
         }
 

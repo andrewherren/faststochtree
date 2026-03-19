@@ -25,11 +25,11 @@ struct Tree {
 
     bool is_leaf(int k) const { return nodes[k].split_var == -1; }
 
-    // Traverse observation i using row-major quantized X (Xq[i*p + j]); returns node index.
-    int traverse(const uint8_t* Xq, int i, int p) const {
+    // Traverse observation i using column-major quantized X (Xq[j*n + i]); returns node index.
+    int traverse(const uint8_t* Xq, int i, int n) const {
         int k = 0;
         while (!is_leaf(k)) {
-            uint8_t val = Xq[i * p + nodes[k].split_var];
+            uint8_t val = Xq[nodes[k].split_var * n + i];
             k = (val <= nodes[k].threshold) ? nodes[k].left : nodes[k].right;
         }
         return k;

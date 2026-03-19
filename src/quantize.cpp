@@ -36,9 +36,9 @@ QuantizedX quantize(const float* X, int n, int p, int max_cuts) {
             }
         }
 
-        // Map each observation to its cut-point index
+        // Map each observation to its cut-point index; store column-major
         for (int i = 0; i < n; i++)
-            qx.data[i * p + j] = (uint8_t)map_to_cut(X[i * p + j], cuts);
+            qx.data[j * n + i] = (uint8_t)map_to_cut(X[i * p + j], cuts);
     }
     return qx;
 }
@@ -51,7 +51,7 @@ QuantizedX quantize_with_cuts(const float* X, int n, const QuantizedX& ref) {
 
     for (int j = 0; j < ref.p; j++)
         for (int i = 0; i < n; i++)
-            qx.data[i * ref.p + j] = (uint8_t)map_to_cut(X[i * ref.p + j], ref.cuts[j]);
+            qx.data[j * n + i] = (uint8_t)map_to_cut(X[i * ref.p + j], ref.cuts[j]);
 
     return qx;
 }

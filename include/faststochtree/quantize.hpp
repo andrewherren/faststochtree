@@ -9,7 +9,7 @@ struct QuantizedX {
     std::vector<uint8_t>            data;  // row-major [n*p]: data[i*p + j]
     std::vector<std::vector<float>> cuts;  // cuts[j]: sorted cut-point float values
 
-    uint8_t at(int i, int j) const { return data[i * p + j]; }
+    uint8_t at(int i, int j) const { return data[j * n + i]; }
 };
 
 // Quantize float X[n*p] (row-major) using up to max_cuts cut-points per feature.

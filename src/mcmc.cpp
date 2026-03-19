@@ -14,7 +14,7 @@ static void node_stats(const Tree& tree, int target_k,
                        float& sum_y, int& count) {
     sum_y = 0.f; count = 0;
     for (int i = 0; i < n; i++) {
-        if (tree.traverse(Xq.data.data(), i, Xq.p) == target_k) {
+        if (tree.traverse(Xq.data.data(), i, Xq.n) == target_k) {
             sum_y += resid[i];
             count++;
         }
@@ -38,7 +38,7 @@ static void propose_grow(Tree& tree, const QuantizedX& Xq, const float* resid,
 
     uint8_t var_min = 255, var_max = 0;
     for (int i = 0; i < n; i++) {
-        if (tree.traverse(Xq.data.data(), i, Xq.p) == lk) {
+        if (tree.traverse(Xq.data.data(), i, Xq.n) == lk) {
             uint8_t v = Xq.at(i, var);
             if (v < var_min) var_min = v;
             if (v > var_max) var_max = v;
@@ -52,7 +52,7 @@ static void propose_grow(Tree& tree, const QuantizedX& Xq, const float* resid,
     float left_sum = 0.f, right_sum = 0.f, node_sum = 0.f;
     int   left_n   = 0,   right_n   = 0,   node_n   = 0;
     for (int i = 0; i < n; i++) {
-        if (tree.traverse(Xq.data.data(), i, Xq.p) == lk) {
+        if (tree.traverse(Xq.data.data(), i, Xq.n) == lk) {
             node_sum += resid[i]; node_n++;
             if (Xq.at(i, var) <= threshold) { left_sum  += resid[i]; left_n++;  }
             else                             { right_sum += resid[i]; right_n++; }
@@ -150,7 +150,7 @@ static void propose_move(Tree& tree, const QuantizedX& Xq, const float* resid,
     for (int lk : ls) {
         int cnt = 0;
         for (int i = 0; i < n; i++)
-            if (tree.traverse(Xq.data.data(), i, Xq.p) == lk) cnt++;
+            if (tree.traverse(Xq.data.data(), i, Xq.n) == lk) cnt++;
         if (cnt >= 2 * cfg.min_samples_leaf) { grow_possible = true; break; }
     }
     bool prune_possible = !lps.empty();
@@ -186,7 +186,7 @@ void sample_leaves(Tree& tree, const QuantizedX& Xq, const float* resid,
     std::unordered_map<int, float> sum_map;
     std::unordered_map<int, int>   cnt_map;
     for (int i = 0; i < n; i++) {
-        int k = tree.traverse(Xq.data.data(), i, Xq.p);
+        int k = tree.traverse(Xq.data.data(), i, Xq.n);
         sum_map[k] += resid[i];
         cnt_map[k]++;
     }
@@ -221,7 +221,7 @@ void mcmc_sweep(BARTState& s, const BARTConfig& cfg, RNG& rng) {
 
         for (int i = 0; i < s.n; i++)
             s.pred[t][i] = s.trees[t].nodes[
-                s.trees[t].traverse(s.Xq.data.data(), i, s.p)].value;
+                s.trees[t].traverse(s.Xq.data.data(), i, s.n)].value;
         for (int i = 0; i < s.n; i++) s.residual[i] -= s.pred[t][i];
     }
     sample_sigma2(s.residual.data(), s.n, s.sigma2, cfg, rng);
