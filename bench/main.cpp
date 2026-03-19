@@ -20,14 +20,17 @@ static const char* get_arg(int argc, char** argv, const char* key, const char* d
 }
 
 int main(int argc, char** argv) {
-    int   n_train    = atoi(get_arg(argc, argv, "n_train",  "50000"));
-    int   n_test     = atoi(get_arg(argc, argv, "n_test",   "500"));
-    int   p          = atoi(get_arg(argc, argv, "p",        "50"));
-    int   num_trees  = atoi(get_arg(argc, argv, "trees",    "200"));
-    int   n_burnin   = atoi(get_arg(argc, argv, "burnin",   "200"));
-    int   n_samples  = atoi(get_arg(argc, argv, "samples",  "1000"));
-    int   seed       = atoi(get_arg(argc, argv, "seed",     "12345"));
-    float sigma_true = atof(get_arg(argc, argv, "sigma",    "1.0"));
+    const char* mode     = get_arg(argc, argv, "mode",    "bart");
+    int   n_train        = atoi(get_arg(argc, argv, "n_train",  "50000"));
+    int   n_test         = atoi(get_arg(argc, argv, "n_test",   "500"));
+    int   p              = atoi(get_arg(argc, argv, "p",        "50"));
+    int   num_trees      = atoi(get_arg(argc, argv, "trees",    "200"));
+    int   seed           = atoi(get_arg(argc, argv, "seed",     "12345"));
+    float sigma_true     = atof(get_arg(argc, argv, "sigma",    "1.0"));
+
+    bool xbart = (strcmp(mode, "xbart") == 0);
+    int  n_burnin  = atoi(get_arg(argc, argv, "burnin",  xbart ? "15"   : "200"));
+    int  n_samples = atoi(get_arg(argc, argv, "samples", xbart ? "25"   : "1000"));
 
     int n_total = n_train + n_test;
 
@@ -51,7 +54,8 @@ int main(int argc, char** argv) {
 
     bart::RNG model_rng(seed + 1);
 
-    printf("faststochtree BART benchmark (v11-zero-alloc)\n");
+    const char* tag = xbart ? "gfr-v1-naive" : "v11-zero-alloc";
+    printf("faststochtree %s benchmark (%s)\n", xbart ? "XBART" : "BART", tag);
     printf("  n_train=%d  n_test=%d  p=%d  trees=%d\n",
            n_train, n_test, p, num_trees);
     printf("  burnin=%d  samples=%d  sigma_true=%.2f\n",
@@ -62,9 +66,11 @@ int main(int argc, char** argv) {
     fflush(stdout);
 
     const float* X_test = X.data() + n_train * p;
-    auto result = bart::run_bart(X.data(), y_all.data(), n_train, p,
-                                 X_test, n_test,
-                                 cfg, n_burnin, n_samples, model_rng);
+    auto result = xbart
+        ? bart::run_xbart(X.data(), y_all.data(), n_train, p,
+                          X_test, n_test, cfg, n_burnin, n_samples, model_rng)
+        : bart::run_bart (X.data(), y_all.data(), n_train, p,
+                          X_test, n_test, cfg, n_burnin, n_samples, model_rng);
 
     auto t1 = std::chrono::steady_clock::now();
     long ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();

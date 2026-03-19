@@ -17,4 +17,8 @@ BARTResult run_bart(const float* X,      const float* y, int n, int p,
                     const float* X_test, int n_test,
                     const BARTConfig& cfg, int n_burnin, int n_samples, RNG& rng);
 
+BARTResult run_xbart(const float* X,      const float* y, int n, int p,
+                     const float* X_test, int n_test,
+                     const BARTConfig& cfg, int n_burnin, int n_samples, RNG& rng);
+
 } // namespace bart

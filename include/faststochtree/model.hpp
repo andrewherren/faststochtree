@@ -28,6 +28,9 @@ struct Workspace {
     // Scratch for tree.leaves() / tree.leaf_parents() — avoid per-call alloc
     std::vector<int> leaves_buf;
     std::vector<int> leaf_parents_buf;
+    // All-zeros array of size n — used as pred_off=0 in gfr_sweep after
+    // explicit restore (avoids a separate sample_leaves overload).
+    std::vector<float> zeros;
 };
 
 struct BARTState {

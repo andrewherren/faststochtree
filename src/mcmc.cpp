@@ -229,6 +229,7 @@ void init_state(BARTState& state, const BARTConfig& cfg, RNG& rng) {
     // Pre-allocate workspace scratch buffers
     state.ws.leaves_buf.reserve(state.trees[0].full_size + 1);
     state.ws.leaf_parents_buf.reserve(state.trees[0].half_size + 1);
+    state.ws.zeros.assign(state.n, 0.f);
     (void)rng;
 }
 
