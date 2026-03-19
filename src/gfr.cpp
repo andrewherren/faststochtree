@@ -75,10 +75,10 @@ static void update_partition(TreePartition& part, int node_k,
 }
 
 // -----------------------------------------------------------------------
-// grow_tree_gfr (v3) — two-stage feature/cutpoint sampling
-// Stage 1: sample feature (or no-split) from p+1 log-sum-exp totals (O(p)).
-// Stage 2: sample cutpoint within chosen feature (O(n_k)).
-// Memory: O(p) per node instead of O(n_k*p) for the flat candidate list.
+// grow_tree_gfr (v4) — pre-gather residuals before prefix sum
+// Gather scattered resid[w[k]] reads into a contiguous buffer first,
+// then scan sequentially — enables compiler auto-vectorisation of the
+// prefix-sum inner loop.  Buffer is O(n_k) per node, reused across p features.
 // -----------------------------------------------------------------------
 
 void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
@@ -93,6 +93,9 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
     struct FCand { uint8_t thresh; float sum_L; int count_L; };
     std::vector<std::vector<FCand>> feat_cands(p);
     std::vector<std::vector<float>> feat_log_wts(p);
+
+    // Gather buffer — sized to max node size (n); reused across features per node
+    std::vector<float> resid_buf(n);
 
     std::deque<int> queue;
     queue.push_back(1);
@@ -132,14 +135,19 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
 
             auto [beg_j, end_j] = part.ranges[j].at(node_k);
             const auto& w = part.working[j];
+
+            // Gather pass: scattered resid[w[k]] → contiguous resid_buf[0..n_k)
+            for (int k = beg_j; k < end_j; k++)
+                resid_buf[k - beg_j] = resid[w[k]];
+
+            // Prefix-sum pass: sequential reads from resid_buf — vectorizable
             float sum_L = 0.f; int count_L = 0;
             float max_lw = -std::numeric_limits<float>::infinity();
 
-            // First pass: collect candidates and find max log-weight
-            for (int k = beg_j; k < end_j - 1; k++) {
-                int obs_i = w[k];
-                sum_L += resid[obs_i]; count_L++;
-                if (Xq.at(obs_i, j) >= Xq.at(w[k+1], j)) continue;  // tie
+            for (int k = 0; k < n_k - 1; k++) {
+                sum_L += resid_buf[k]; count_L++;
+                int obs_i = w[beg_j + k];
+                if (Xq.at(obs_i, j) >= Xq.at(w[beg_j + k + 1], j)) continue;  // tie
                 int count_R = count_T - count_L;
                 if (count_L < cfg.min_samples_leaf || count_R < cfg.min_samples_leaf) continue;
                 float log_ml = leaf_log_ml(sum_L, count_L, sigma2, cfg.leaf_prior_var)
