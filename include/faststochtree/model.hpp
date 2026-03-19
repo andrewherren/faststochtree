@@ -43,7 +43,9 @@ void sample_sigma2(const float* resid, int n, float& sigma2,
 
 // Sample leaf values for all leaves of one tree (Gaussian posterior).
 // Uses pre-cached leaf_idx[i] instead of re-traversing.
-void sample_leaves(Tree& tree, const float* resid,
+// pred_off[i] is added to resid[i] to form the effective partial residual
+// (eliminates the explicit restore pass in mcmc_sweep).
+void sample_leaves(Tree& tree, const float* resid, const float* pred_off,
                    int n, float sigma2, const BARTConfig& cfg, RNG& rng,
                    const std::vector<int>& leaf_idx);
 
