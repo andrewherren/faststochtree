@@ -1,6 +1,6 @@
 #include "faststochtree/mcmc.hpp"
 #include <cmath>
-#include <unordered_map>
+#include <vector>
 
 namespace bart {
 
@@ -180,19 +180,23 @@ void sample_leaves(Tree& tree, const float* resid,
                    int n, float sigma2, const BARTConfig& cfg, RNG& rng,
                    const std::vector<int>& leaf_idx) {
     float tau = cfg.leaf_prior_var;
+    int   sz  = tree.full_size + 1;  // 128 for depth=6: fits easily in L1
 
-    std::unordered_map<int, float> sum_map;
-    std::unordered_map<int, int>   cnt_map;
+    // Flat scatter buffers — replace unordered_map with fixed-size arrays
+    std::vector<float> sum_buf(sz, 0.f);
+    std::vector<int>   cnt_buf(sz, 0);
+
+    // Fused scatter: one pass over leaf_idx and resid
     for (int i = 0; i < n; i++) {
         int k = leaf_idx[i];
-        sum_map[k] += resid[i];
-        cnt_map[k]++;
+        sum_buf[k] += resid[i];
+        cnt_buf[k]++;
     }
 
-    for (auto& [k, sum_y] : sum_map) {
-        int   cnt       = cnt_map[k];
-        float post_mean = (tau * sum_y) / (cnt * tau + sigma2);
-        float post_var  = (tau * sigma2) / (cnt * tau + sigma2);
+    for (int k = 1; k < sz; k++) {
+        if (cnt_buf[k] == 0) continue;
+        float post_mean = (tau * sum_buf[k]) / (cnt_buf[k] * tau + sigma2);
+        float post_var  = (tau * sigma2)      / (cnt_buf[k] * tau + sigma2);
         tree.leaf_value[k] = post_mean + std::sqrt(post_var) * rng.normal();
     }
 }
