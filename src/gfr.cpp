@@ -4,7 +4,6 @@
 #include <cmath>
 #include <limits>
 #include <numeric>
-#include <unordered_map>
 #include <vector>
 
 namespace bart {
@@ -25,21 +24,7 @@ void PresortedX::build(const QuantizedX& Xq, int n, int p) {
     }
 }
 
-// -----------------------------------------------------------------------
-// TreePartition — per-tree mutable copy of sorted_idx with [beg,end)
-// range tracking per node per feature.
-// -----------------------------------------------------------------------
-
-struct TreePartition {
-    std::vector<std::vector<int>>                          working;  // [p][n]
-    std::vector<std::unordered_map<int,std::pair<int,int>>> ranges;  // [p][node→{beg,end}]
-
-    void init(const PresortedX& ps, int n, int p) {
-        working = ps.sorted_idx;  // deep copy; O(n*p) — eliminated in gfr-v8
-        ranges.assign(p, {});
-        for (int j = 0; j < p; j++) ranges[j][1] = {0, n};
-    }
-};
+// TreePartition is defined in model.hpp (gfr-v8: persistent workspace).
 
 // Parallel version of update_partition (gfr-v7).
 // Phase 1 (parallel): stable-partition working[j] for each j independently.
@@ -246,11 +231,9 @@ static NodeDecision eval_node(int node_k, const TreePartition& part,
 
 void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
                    int n, int p, float sigma2, const BARTConfig& cfg, RNG& rng,
-                   const PresortedX& ps, ThreadPool* pool) {
+                   const PresortedX& ps, TreePartition& part, ThreadPool* pool) {
     tree.reset();
-
-    TreePartition part;
-    part.init(ps, n, p);
+    part.reinit(ps, n, p);
 
     int m = (cfg.p_eval > 0 && cfg.p_eval < p) ? cfg.p_eval : p;
 
@@ -306,7 +289,7 @@ void gfr_sweep(BARTState& state, const BARTConfig& cfg, RNG& rng) {
 
         grow_tree_gfr(state.trees[t], state.Xq, state.residual.data(),
                       n, state.p, state.sigma2, cfg, rng, state.presorted,
-                      state.thread_pool.get());
+                      state.gfr_partition, state.thread_pool.get());
 
         // Rebuild leaf index cache — tree was rebuilt from scratch
         for (int i = 0; i < n; i++)
