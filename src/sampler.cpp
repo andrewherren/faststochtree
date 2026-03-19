@@ -41,8 +41,8 @@ BARTResult run_bart(const float* X,      const float* y, int n, int p,
             std::vector<float> test_pred(n_test, 0.f);
             for (int t = 0; t < cfg.num_trees; t++)
                 for (int i = 0; i < n_test; i++)
-                    test_pred[i] += state.trees[t].nodes[
-                        state.trees[t].traverse(test_qx.data.data(), i, n_test)].value;
+                    test_pred[i] += state.trees[t].leaf_value[
+                        state.trees[t].traverse(test_qx.data.data(), i, n_test)];
             result.test_samples.push_back(std::move(test_pred));
         }
 

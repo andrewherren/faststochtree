@@ -1,89 +1,89 @@
 #pragma once
+#include <algorithm>
+#include <cassert>
 #include <cstdint>
 #include <vector>
-#include <cassert>
 
-// v3-quantized: threshold is now uint8_t (quantized cut-point index).
+// v5-fixed-depth: implicit binary heap tree.
+//
+// 1-indexed nodes. With depth=6:
+//   half_size = 63  (last internal node index; split_var defined for [0..63])
+//   full_size = 127 (last node index; leaf_value defined for [0..127])
+//   Internal nodes: [1, 63]  — can be split or unsplit (leaf)
+//   Always-leaf:    [64, 127] — bottom level, never split
+//
+// This gives 64 × (4+1) = 320 bytes for split_var + threshold, matching the
+// plan's performance analysis.
 
 namespace bart {
 
-struct Node {
-    int     split_var;  // feature index; -1 = leaf
-    uint8_t threshold;  // quantized cut-point index
-    float   value;      // leaf prediction (used only when split_var == -1)
-    int     depth;
-    int     left;       // index into Tree::nodes; -1 if leaf
-    int     right;
-};
-
 struct Tree {
-    std::vector<Node> nodes;  // nodes[0] is always the root
+    int depth;      // max leaf depth
+    int half_size;  // (1<<depth)-1: last internal node index
+    int full_size;  // (1<<(depth+1))-1: last node index
 
-    Tree() {
-        nodes.push_back({-1, 0, 0.f, 0, -1, -1});  // root
+    std::vector<int>     split_var;   // [0..half_size]; 0 = unsplit (leaf); actual var = split_var[k]-1
+    std::vector<uint8_t> threshold;   // [0..half_size]
+    std::vector<float>   leaf_value;  // [0..full_size]; valid for any node index
+
+    explicit Tree(int depth_ = 6)
+        : depth(depth_),
+          half_size((1 << depth_) - 1),
+          full_size((1 << (depth_ + 1)) - 1),
+          split_var(half_size + 1, 0),
+          threshold(half_size + 1, 0),
+          leaf_value(full_size + 1, 0.f) {}
+
+    bool is_leaf(int k) const { return k > half_size || split_var[k] == 0; }
+
+    // Depth of node k in the heap (root = 0).
+    static int depth_of(int k) {
+        int d = 0;
+        while (k > 1) { k >>= 1; d++; }
+        return d;
     }
 
-    bool is_leaf(int k) const { return nodes[k].split_var == -1; }
-
-    // Traverse observation i using column-major quantized X (Xq[j*n + i]); returns node index.
+    // Traverse observation i (column-major Xq[j*n+i]); returns leaf node index.
     int traverse(const uint8_t* Xq, int i, int n) const {
-        int k = 0;
-        while (!is_leaf(k)) {
-            uint8_t val = Xq[nodes[k].split_var * n + i];
-            k = (val <= nodes[k].threshold) ? nodes[k].left : nodes[k].right;
+        int k = 1;
+        while (k <= half_size && split_var[k] != 0) {
+            int var = split_var[k] - 1;
+            k = 2*k + (Xq[var * n + i] > threshold[k] ? 1 : 0);
         }
         return k;
     }
 
-    // All leaf node indices
-    std::vector<int> leaves() const {
-        std::vector<int> r;
-        collect_leaves(0, r);
-        return r;
+    // Grow leaf k: make it an internal node, push leaf value to children.
+    void grow(int k, int var, uint8_t thresh) {
+        assert(is_leaf(k) && k <= half_size);
+        split_var[k]      = var + 1;
+        threshold[k]      = thresh;
+        leaf_value[2*k]   = leaf_value[k];
+        leaf_value[2*k+1] = leaf_value[k];
     }
 
-    // All internal node indices whose two children are both leaves
-    std::vector<int> leaf_parents() const {
-        std::vector<int> r;
-        collect_leaf_parents(0, r);
-        return r;
-    }
-
-    // Grow leaf k into an internal node; appends two new leaf children
-    void grow(int k, int var, uint8_t threshold) {
-        assert(is_leaf(k));
-        int li = (int)nodes.size();
-        nodes.push_back({-1, 0, nodes[k].value, nodes[k].depth + 1, -1, -1});
-        int ri = (int)nodes.size();
-        nodes.push_back({-1, 0, nodes[k].value, nodes[k].depth + 1, -1, -1});
-        // Must index nodes[k] after push_back in case of reallocation
-        nodes[k].split_var  = var;
-        nodes[k].threshold  = threshold;
-        nodes[k].left       = li;
-        nodes[k].right      = ri;
-    }
-
-    // Prune leaf-parent k back to a leaf (children become orphaned slots)
+    // Prune internal node k (both children must be leaves).
     void prune(int k) {
         assert(!is_leaf(k));
-        assert(is_leaf(nodes[k].left) && is_leaf(nodes[k].right));
-        nodes[k].split_var = -1;
-        nodes[k].left      = -1;
-        nodes[k].right     = -1;
+        assert(is_leaf(2*k) && is_leaf(2*k+1));
+        split_var[k] = 0;
     }
 
-private:
-    void collect_leaves(int k, std::vector<int>& r) const {
-        if (is_leaf(k)) { r.push_back(k); return; }
-        collect_leaves(nodes[k].left,  r);
-        collect_leaves(nodes[k].right, r);
+    // Reset to a single-leaf root (used by GFR).
+    void reset() { std::fill(split_var.begin(), split_var.end(), 0); }
+
+    std::vector<int> leaves() const {
+        std::vector<int> r;
+        for (int k = 1; k <= full_size; k++)
+            if (is_leaf(k) && (k == 1 || !is_leaf(k >> 1))) r.push_back(k);
+        return r;
     }
-    void collect_leaf_parents(int k, std::vector<int>& r) const {
-        if (is_leaf(k)) return;
-        if (is_leaf(nodes[k].left) && is_leaf(nodes[k].right))
-            r.push_back(k);
-        collect_leaf_parents(nodes[k].left,  r);
-        collect_leaf_parents(nodes[k].right, r);
+
+    std::vector<int> leaf_parents() const {
+        std::vector<int> r;
+        for (int k = 1; k <= half_size; k++)
+            if (!is_leaf(k) && is_leaf(2*k) && is_leaf(2*k+1)) r.push_back(k);
+        return r;
     }
 };
 
