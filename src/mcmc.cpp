@@ -9,6 +9,7 @@ namespace bart {
 // -----------------------------------------------------------------------
 
 static void propose_grow(Tree& tree, const QuantizedX& Xq, const float* resid,
+                         const float* pred_off,
                          int n, float sigma2,
                          const BARTConfig& cfg, RNG& rng,
                          float prob_grow, std::vector<int>& leaf_idx) {
@@ -36,9 +37,10 @@ static void propose_grow(Tree& tree, const QuantizedX& Xq, const float* resid,
     int   left_n   = 0,   right_n   = 0,   node_n   = 0;
     for (int i = 0; i < n; i++) {
         if (leaf_idx[i] == lk) {
-            node_sum += resid[i]; node_n++;
-            if (Xq.at(i, var) <= threshold) { left_sum  += resid[i]; left_n++;  }
-            else                             { right_sum += resid[i]; right_n++; }
+            float r = resid[i] + pred_off[i];
+            node_sum += r; node_n++;
+            if (Xq.at(i, var) <= threshold) { left_sum  += r; left_n++;  }
+            else                             { right_sum += r; right_n++; }
         }
     }
 
@@ -80,7 +82,7 @@ static void propose_grow(Tree& tree, const QuantizedX& Xq, const float* resid,
 // Prune proposal — uses cached leaf_idx; updates cache on acceptance
 // -----------------------------------------------------------------------
 
-static void propose_prune(Tree& tree, const float* resid,
+static void propose_prune(Tree& tree, const float* resid, const float* pred_off,
                           int n, float sigma2,
                           const BARTConfig& cfg, RNG& rng,
                           float prob_prune, std::vector<int>& leaf_idx) {
@@ -96,8 +98,9 @@ static void propose_prune(Tree& tree, const float* resid,
     float left_sum = 0.f, right_sum = 0.f;
     int   left_n   = 0,   right_n   = 0;
     for (int i = 0; i < n; i++) {
-        if      (leaf_idx[i] == left_child)  { left_sum  += resid[i]; left_n++;  }
-        else if (leaf_idx[i] == right_child) { right_sum += resid[i]; right_n++; }
+        float r = resid[i] + pred_off[i];
+        if      (leaf_idx[i] == left_child)  { left_sum  += r; left_n++;  }
+        else if (leaf_idx[i] == right_child) { right_sum += r; right_n++; }
     }
     float node_sum = left_sum + right_sum;
     int   node_n   = left_n   + right_n;
@@ -136,6 +139,7 @@ static void propose_prune(Tree& tree, const float* resid,
 // -----------------------------------------------------------------------
 
 static void propose_move(Tree& tree, const QuantizedX& Xq, const float* resid,
+                         const float* pred_off,
                          int n, float sigma2,
                          const BARTConfig& cfg, RNG& rng,
                          std::vector<int>& leaf_idx) {
@@ -158,9 +162,9 @@ static void propose_move(Tree& tree, const QuantizedX& Xq, const float* resid,
     float prob_prune = prune_possible ? (grow_possible  ? 0.5f : 1.0f) : 0.0f;
 
     if (rng.uniform() < prob_grow)
-        propose_grow(tree,  Xq, resid, n, sigma2, cfg, rng, prob_grow,  leaf_idx);
+        propose_grow(tree,  Xq, resid, pred_off, n, sigma2, cfg, rng, prob_grow,  leaf_idx);
     else
-        propose_prune(tree,     resid, n, sigma2, cfg, rng, prob_prune, leaf_idx);
+        propose_prune(tree,     resid, pred_off, n, sigma2, cfg, rng, prob_prune, leaf_idx);
 }
 
 // -----------------------------------------------------------------------
@@ -176,15 +180,13 @@ void sample_sigma2(const float* resid, int n, float& sigma2,
     sigma2 = scale / rng.gamma(shape);
 }
 
-void sample_leaves(Tree& tree, const float* resid,
+void sample_leaves(Tree& tree, const float* resid, const float* pred_off,
                    int n, float sigma2, const BARTConfig& cfg, RNG& rng,
                    const std::vector<int>& leaf_idx) {
     float tau = cfg.leaf_prior_var;
     int   sz  = tree.full_size + 1;  // 128 for depth=6
 
-    // v9: K=4 independent scatter lanes break store-forwarding stalls when
-    // consecutive observations share a leaf. Lane arrays live on the stack
-    // (128×4×8 bytes = 4 KB) and stay hot in L1.
+    // K=4 scatter lanes; scatter effective residual = resid[i] + pred_off[i]
     float s0[128]={}, s1[128]={}, s2[128]={}, s3[128]={};
     int   c0[128]={}, c1[128]={}, c2[128]={}, c3[128]={};
 
@@ -192,14 +194,14 @@ void sample_leaves(Tree& tree, const float* resid,
     for (int i = 0; i < n4; i += 4) {
         int l0 = leaf_idx[i],   l1 = leaf_idx[i+1],
             l2 = leaf_idx[i+2], l3 = leaf_idx[i+3];
-        s0[l0] += resid[i];   c0[l0]++;
-        s1[l1] += resid[i+1]; c1[l1]++;
-        s2[l2] += resid[i+2]; c2[l2]++;
-        s3[l3] += resid[i+3]; c3[l3]++;
+        s0[l0] += resid[i]   + pred_off[i];   c0[l0]++;
+        s1[l1] += resid[i+1] + pred_off[i+1]; c1[l1]++;
+        s2[l2] += resid[i+2] + pred_off[i+2]; c2[l2]++;
+        s3[l3] += resid[i+3] + pred_off[i+3]; c3[l3]++;
     }
     for (int i = n4; i < n; i++) {
         int k = leaf_idx[i];
-        s0[k] += resid[i]; c0[k]++;
+        s0[k] += resid[i] + pred_off[i]; c0[k]++;
     }
 
     for (int k = 1; k < sz; k++) {
@@ -225,18 +227,19 @@ void init_state(BARTState& state, const BARTConfig& cfg, RNG& rng) {
 
 void mcmc_sweep(BARTState& s, const BARTConfig& cfg, RNG& rng) {
     for (int t = 0; t < cfg.num_trees; t++) {
-        for (int i = 0; i < s.n; i++) s.residual[i] += s.pred[t][i];
-
-        propose_move(s.trees[t], s.Xq, s.residual.data(),
+        // v10: no restore pass — pred[t] passed as offset into propose and scatter
+        propose_move(s.trees[t], s.Xq, s.residual.data(), s.pred[t].data(),
                      s.n, s.sigma2, cfg, rng, s.leaf_indices[t]);
 
-        sample_leaves(s.trees[t], s.residual.data(),
+        sample_leaves(s.trees[t], s.residual.data(), s.pred[t].data(),
                       s.n, s.sigma2, cfg, rng, s.leaf_indices[t]);
 
-        // Pred update: direct lookup — no traversal
-        for (int i = 0; i < s.n; i++)
-            s.pred[t][i] = s.trees[t].leaf_value[s.leaf_indices[t][i]];
-        for (int i = 0; i < s.n; i++) s.residual[i] -= s.pred[t][i];
+        // Fused delta update: one pass instead of pred_update + subtract
+        for (int i = 0; i < s.n; i++) {
+            float pred_new   = s.trees[t].leaf_value[s.leaf_indices[t][i]];
+            s.residual[i]   += s.pred[t][i] - pred_new;
+            s.pred[t][i]     = pred_new;
+        }
     }
     sample_sigma2(s.residual.data(), s.n, s.sigma2, cfg, rng);
 }
