@@ -41,6 +41,43 @@ struct TreePartition {
     }
 };
 
+// Parallel version of update_partition (gfr-v7).
+// Phase 1 (parallel): stable-partition working[j] for each j independently.
+//   Different j → different working[j] arrays → no data race.
+// Phase 2 (sequential): update ranges maps — O(p) map ops, negligible.
+static void update_partition_parallel(TreePartition& part, int node_k,
+                                       int feat, uint8_t thresh, int count_L,
+                                       const QuantizedX& Xq, int p,
+                                       ThreadPool& pool) {
+    std::vector<int> left_counts(p);
+
+    pool.parallel_for(0, p, [&](int j) {
+        auto [beg, end] = part.ranges[j].at(node_k);
+        auto& w = part.working[j];
+        if (j == feat) {
+            left_counts[j] = count_L;
+        } else {
+            thread_local std::vector<int> right_buf;
+            right_buf.clear();
+            int write = beg;
+            for (int k = beg; k < end; k++) {
+                int obs = w[k];
+                if (Xq.at(obs, feat) <= thresh) w[write++] = obs;
+                else right_buf.push_back(obs);
+            }
+            left_counts[j] = write - beg;
+            for (int obs : right_buf) w[write++] = obs;
+        }
+    });
+
+    for (int j = 0; j < p; j++) {
+        auto [beg, end] = part.ranges[j].at(node_k);
+        part.ranges[j][2*node_k]   = {beg, beg + left_counts[j]};
+        part.ranges[j][2*node_k+1] = {beg + left_counts[j], end};
+        part.ranges[j].erase(node_k);
+    }
+}
+
 // Stable-partition all p feature working arrays after a split at node_k.
 // For the split feature, the pre-sorted order already separates left/right.
 // For all other features, we partition in-place preserving sorted order.
@@ -90,7 +127,7 @@ static NodeDecision eval_node(int node_k, const TreePartition& part,
                                const QuantizedX& Xq, const float* resid,
                                int n, int p, int m, int n_k, float sum_T,
                                float sigma2, const BARTConfig& cfg,
-                               RNG& local_rng, int depth) {
+                               RNG& local_rng, int depth, ThreadPool* pool) {
     struct FCand { uint8_t thresh; float sum_L; int count_L; };
 
     // Fisher-Yates: per-node scratch (small, stack-friendly)
@@ -102,19 +139,20 @@ static NodeDecision eval_node(int node_k, const TreePartition& part,
     }
 
     std::vector<float> feat_log_total(m + 1, -std::numeric_limits<float>::infinity());
-    std::vector<float> resid_buf(n_k);
-    int n_valid_feats = 0;
 
     float p_split = cfg.alpha / std::pow(1.f + depth, cfg.beta);
     p_split = std::min(p_split, 1.f - 1e-6f);
     float log_split_ratio = std::log(p_split) - std::log(1.f - p_split);
     int count_T = n_k;
 
-    // Pass 1: per-feature log-sum-exp totals (online LSE, no storage)
-    for (int fi = 0; fi < m; fi++) {
+    // Pass 1: per-feature log-sum-exp totals (online LSE, no storage).
+    // Each feature slot feat_log_total[fi] is written by exactly one thread → no race.
+    auto pass1 = [&](int fi) {
+        thread_local std::vector<float> resid_buf;
         int j = feat_order[fi];
         auto [beg_j, end_j] = part.ranges[j].at(node_k);
         const auto& w = part.working[j];
+        resid_buf.resize(n_k);
         for (int k = beg_j; k < end_j; k++)
             resid_buf[k - beg_j] = resid[w[k]];
         float sum_L = 0.f; int count_L = 0;
@@ -130,8 +168,17 @@ static NodeDecision eval_node(int node_k, const TreePartition& part,
             if (log_ml > max_lw) { sum_exp = sum_exp * std::exp(max_lw - log_ml) + 1.f; max_lw = log_ml; }
             else sum_exp += std::exp(log_ml - max_lw);
         }
-        if (sum_exp > 0.f) { feat_log_total[fi] = max_lw + std::log(sum_exp); n_valid_feats++; }
-    }
+        if (sum_exp > 0.f) feat_log_total[fi] = max_lw + std::log(sum_exp);
+    };
+
+    bool par_scan = pool && ((long)m * n_k > 200'000L);
+    if (par_scan) pool->parallel_for(0, m, pass1);
+    else          for (int fi = 0; fi < m; fi++) pass1(fi);
+
+    int n_valid_feats = 0;
+    for (int fi = 0; fi < m; fi++)
+        if (feat_log_total[fi] > -std::numeric_limits<float>::infinity()) n_valid_feats++;
+
     feat_log_total[m] = leaf_log_ml(sum_T, count_T, sigma2, cfg.leaf_prior_var)
                       - log_split_ratio
                       + (n_valid_feats > 0 ? std::log((float)n_valid_feats) : 0.f);
@@ -153,8 +200,10 @@ static NodeDecision eval_node(int node_k, const TreePartition& part,
     std::vector<FCand>  cands;
     std::vector<float>  log_wts;
     {
+        thread_local std::vector<float> resid_buf;
         auto [beg_j, end_j] = part.ranges[chosen_feat].at(node_k);
         const auto& w = part.working[chosen_feat];
+        resid_buf.resize(n_k);
         for (int k = beg_j; k < end_j; k++) resid_buf[k - beg_j] = resid[w[k]];
         float sum_L = 0.f; int count_L = 0;
         for (int k = 0; k < n_k - 1; k++) {
@@ -184,13 +233,15 @@ static NodeDecision eval_node(int node_k, const TreePartition& part,
 }
 
 // -----------------------------------------------------------------------
-// grow_tree_gfr (v6) — level-BFS with optional parallel node evaluation
+// grow_tree_gfr (v7) — level-BFS, feature-parallel evaluation and partition
 //
-// Nodes at the same BFS level have disjoint observation sets → independent.
-// Evaluation (histogram scan + sampling) runs in parallel via thread pool.
-// tree.grow + update_partition applied sequentially after collecting results.
+// Nodes are processed sequentially within each BFS level.
+// Parallelism is applied within each node across features:
+//   • Pass 1 scan: pool->parallel_for(0, m, pass1) in eval_node
+//   • Partition update: pool->parallel_for(0, p, ...) in update_partition_parallel
 //
-// pool=nullptr → single-threaded (same as v5 but with level-BFS structure).
+// Both operations are safe to parallelize — each feature owns its own array.
+// pool=nullptr → single-threaded fallback.
 // -----------------------------------------------------------------------
 
 void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
@@ -203,15 +254,10 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
 
     int m = (cfg.p_eval > 0 && cfg.p_eval < p) ? cfg.p_eval : p;
 
-    std::vector<int>          current_level = {1};
-    std::vector<NodeDecision> decisions;
+    std::vector<int> current_level = {1};
 
     while (!current_level.empty()) {
-        // Filter: drop nodes below size/depth thresholds
-        std::vector<int>   active;
-        std::vector<int>   node_nk;
-        std::vector<float> node_sumT;
-        std::vector<int>   node_depth;
+        std::vector<int> next_level;
 
         for (int node_k : current_level) {
             auto it = part.ranges[0].find(node_k);
@@ -226,38 +272,20 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
             float sum_T = 0.f;
             const auto& w0 = part.working[0];
             for (int k = beg0; k < end0; k++) sum_T += resid[w0[k]];
-            active.push_back(node_k);
-            node_nk.push_back(n_k);
-            node_sumT.push_back(sum_T);
-            node_depth.push_back(depth);
-        }
-        if (active.empty()) break;
 
-        // Pre-generate per-node RNG seeds sequentially (preserves global RNG stream)
-        std::vector<unsigned> seeds(active.size());
-        for (auto& s : seeds) s = (unsigned)rng.randint(0, INT_MAX);
-
-        decisions.resize(active.size());
-
-        // Evaluate nodes — parallel if pool provided and work is large enough
-        bool do_parallel = pool && ((int)active.size() * node_nk[0] * m > 500'000);
-
-        auto eval = [&](int ki) {
-            RNG local_rng(seeds[ki]);
-            decisions[ki] = eval_node(active[ki], part, Xq, resid, n, p, m,
-                                       node_nk[ki], node_sumT[ki], sigma2, cfg,
-                                       local_rng, node_depth[ki]);
-        };
-
-        if (do_parallel) pool->parallel_for(0, (int)active.size(), eval);
-        else             for (int ki = 0; ki < (int)active.size(); ki++) eval(ki);
-
-        // Apply splits sequentially (tree + partition writes are not thread-safe)
-        std::vector<int> next_level;
-        for (const auto& d : decisions) {
+            RNG local_rng(rng.randint(0, INT_MAX));
+            NodeDecision d = eval_node(node_k, part, Xq, resid, n, p, m,
+                                       n_k, sum_T, sigma2, cfg, local_rng, depth, pool);
             if (d.feat == -1) continue;
+
             tree.grow(d.node_k, d.feat, d.thresh);
-            update_partition(part, d.node_k, d.feat, d.thresh, d.count_L, Xq, p);
+
+            // Partition update: parallelize across p features when work is large
+            if (pool && (long)n_k * p > 500'000L)
+                update_partition_parallel(part, d.node_k, d.feat, d.thresh, d.count_L, Xq, p, *pool);
+            else
+                update_partition(part, d.node_k, d.feat, d.thresh, d.count_L, Xq, p);
+
             next_level.push_back(2 * d.node_k);
             next_level.push_back(2 * d.node_k + 1);
         }
