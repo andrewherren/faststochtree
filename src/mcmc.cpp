@@ -1,21 +1,20 @@
 #include "faststochtree/mcmc.hpp"
 #include <cmath>
-#include <limits>
 #include <unordered_map>
 
 namespace bart {
 
 // -----------------------------------------------------------------------
 // Helpers: gather per-node statistics by re-traversing all observations.
-// Deliberately O(n * depth) — this is the v1/v2 baseline, not optimized.
+// Deliberately O(n * depth) — this is the v1/v2/v3 baseline, not optimized.
 // -----------------------------------------------------------------------
 
 static void node_stats(const Tree& tree, int target_k,
-                       const float* X, const float* resid, int n, int p,
+                       const QuantizedX& Xq, const float* resid, int n,
                        float& sum_y, int& count) {
     sum_y = 0.f; count = 0;
     for (int i = 0; i < n; i++) {
-        if (tree.traverse(X, i, p) == target_k) {
+        if (tree.traverse(Xq.data.data(), i, Xq.p) == target_k) {
             sum_y += resid[i];
             count++;
         }
@@ -26,8 +25,8 @@ static void node_stats(const Tree& tree, int target_k,
 // Grow proposal
 // -----------------------------------------------------------------------
 
-static void propose_grow(Tree& tree, const float* X, const float* resid,
-                         int n, int p, float sigma2,
+static void propose_grow(Tree& tree, const QuantizedX& Xq, const float* resid,
+                         int n, float sigma2,
                          const BARTConfig& cfg, RNG& rng,
                          float prob_grow) {
     auto ls         = tree.leaves();
@@ -35,28 +34,28 @@ static void propose_grow(Tree& tree, const float* X, const float* resid,
 
     int  lk         = ls[rng.randint(0, num_leaves)];
     int  leaf_depth = tree.nodes[lk].depth;
-    int  var        = rng.randint(0, p);
+    int  var        = rng.randint(0, Xq.p);
 
-    float var_min =  std::numeric_limits<float>::max();
-    float var_max = -std::numeric_limits<float>::max();
+    uint8_t var_min = 255, var_max = 0;
     for (int i = 0; i < n; i++) {
-        if (tree.traverse(X, i, p) == lk) {
-            float v = X[i * p + var];
+        if (tree.traverse(Xq.data.data(), i, Xq.p) == lk) {
+            uint8_t v = Xq.at(i, var);
             if (v < var_min) var_min = v;
             if (v > var_max) var_max = v;
         }
     }
     if (var_max <= var_min) return;
 
-    float threshold = var_min + rng.uniform() * (var_max - var_min);
+    // Sample threshold uniformly from [var_min, var_max - 1]
+    uint8_t threshold = (uint8_t)rng.randint((int)var_min, (int)var_max);
 
     float left_sum = 0.f, right_sum = 0.f, node_sum = 0.f;
     int   left_n   = 0,   right_n   = 0,   node_n   = 0;
     for (int i = 0; i < n; i++) {
-        if (tree.traverse(X, i, p) == lk) {
+        if (tree.traverse(Xq.data.data(), i, Xq.p) == lk) {
             node_sum += resid[i]; node_n++;
-            if (X[i * p + var] <= threshold) { left_sum  += resid[i]; left_n++;  }
-            else                              { right_sum += resid[i]; right_n++; }
+            if (Xq.at(i, var) <= threshold) { left_sum  += resid[i]; left_n++;  }
+            else                             { right_sum += resid[i]; right_n++; }
         }
     }
 
@@ -93,8 +92,8 @@ static void propose_grow(Tree& tree, const float* X, const float* resid,
 // Prune proposal
 // -----------------------------------------------------------------------
 
-static void propose_prune(Tree& tree, const float* X, const float* resid,
-                          int n, int p, float sigma2,
+static void propose_prune(Tree& tree, const QuantizedX& Xq, const float* resid,
+                          int n, float sigma2,
                           const BARTConfig& cfg, RNG& rng,
                           float prob_prune) {
     auto lps        = tree.leaf_parents();
@@ -108,8 +107,8 @@ static void propose_prune(Tree& tree, const float* X, const float* resid,
 
     float left_sum, right_sum;
     int   left_n,   right_n;
-    node_stats(tree, left_child,  X, resid, n, p, left_sum,  left_n);
-    node_stats(tree, right_child, X, resid, n, p, right_sum, right_n);
+    node_stats(tree, left_child,  Xq, resid, n, left_sum,  left_n);
+    node_stats(tree, right_child, Xq, resid, n, right_sum, right_n);
     float node_sum = left_sum + right_sum;
     int   node_n   = left_n   + right_n;
 
@@ -141,8 +140,8 @@ static void propose_prune(Tree& tree, const float* X, const float* resid,
 // One tree update step: decide grow vs prune, then execute
 // -----------------------------------------------------------------------
 
-static void propose_move(Tree& tree, const float* X, const float* resid,
-                         int n, int p, float sigma2,
+static void propose_move(Tree& tree, const QuantizedX& Xq, const float* resid,
+                         int n, float sigma2,
                          const BARTConfig& cfg, RNG& rng) {
     auto ls  = tree.leaves();
     auto lps = tree.leaf_parents();
@@ -151,7 +150,7 @@ static void propose_move(Tree& tree, const float* X, const float* resid,
     for (int lk : ls) {
         int cnt = 0;
         for (int i = 0; i < n; i++)
-            if (tree.traverse(X, i, p) == lk) cnt++;
+            if (tree.traverse(Xq.data.data(), i, Xq.p) == lk) cnt++;
         if (cnt >= 2 * cfg.min_samples_leaf) { grow_possible = true; break; }
     }
     bool prune_possible = !lps.empty();
@@ -162,9 +161,9 @@ static void propose_move(Tree& tree, const float* X, const float* resid,
     float prob_prune = prune_possible ? (grow_possible  ? 0.5f : 1.0f) : 0.0f;
 
     if (rng.uniform() < prob_grow)
-        propose_grow(tree,  X, resid, n, p, sigma2, cfg, rng, prob_grow);
+        propose_grow(tree,  Xq, resid, n, sigma2, cfg, rng, prob_grow);
     else
-        propose_prune(tree, X, resid, n, p, sigma2, cfg, rng, prob_prune);
+        propose_prune(tree, Xq, resid, n, sigma2, cfg, rng, prob_prune);
 }
 
 // -----------------------------------------------------------------------
@@ -180,14 +179,14 @@ void sample_sigma2(const float* resid, int n, float& sigma2,
     sigma2 = scale / rng.gamma(shape);
 }
 
-void sample_leaves(Tree& tree, const float* X, const float* resid,
-                   int n, int p, float sigma2, const BARTConfig& cfg, RNG& rng) {
+void sample_leaves(Tree& tree, const QuantizedX& Xq, const float* resid,
+                   int n, float sigma2, const BARTConfig& cfg, RNG& rng) {
     float tau = cfg.leaf_prior_var;
 
     std::unordered_map<int, float> sum_map;
     std::unordered_map<int, int>   cnt_map;
     for (int i = 0; i < n; i++) {
-        int k = tree.traverse(X, i, p);
+        int k = tree.traverse(Xq.data.data(), i, Xq.p);
         sum_map[k] += resid[i];
         cnt_map[k]++;
     }
@@ -214,14 +213,15 @@ void mcmc_sweep(BARTState& s, const BARTConfig& cfg, RNG& rng) {
     for (int t = 0; t < cfg.num_trees; t++) {
         for (int i = 0; i < s.n; i++) s.residual[i] += s.pred[t][i];
 
-        propose_move(s.trees[t], s.X, s.residual.data(),
-                     s.n, s.p, s.sigma2, cfg, rng);
+        propose_move(s.trees[t], s.Xq, s.residual.data(),
+                     s.n, s.sigma2, cfg, rng);
 
-        sample_leaves(s.trees[t], s.X, s.residual.data(),
-                      s.n, s.p, s.sigma2, cfg, rng);
+        sample_leaves(s.trees[t], s.Xq, s.residual.data(),
+                      s.n, s.sigma2, cfg, rng);
 
         for (int i = 0; i < s.n; i++)
-            s.pred[t][i] = s.trees[t].nodes[s.trees[t].traverse(s.X, i, s.p)].value;
+            s.pred[t][i] = s.trees[t].nodes[
+                s.trees[t].traverse(s.Xq.data.data(), i, s.p)].value;
         for (int i = 0; i < s.n; i++) s.residual[i] -= s.pred[t][i];
     }
     sample_sigma2(s.residual.data(), s.n, s.sigma2, cfg, rng);

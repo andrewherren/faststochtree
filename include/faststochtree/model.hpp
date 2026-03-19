@@ -1,5 +1,6 @@
 #pragma once
 #include "faststochtree/tree.hpp"
+#include "faststochtree/quantize.hpp"
 #include "faststochtree/rng.hpp"
 #include <vector>
 #include <cmath>
@@ -18,7 +19,7 @@ struct BARTConfig {
 
 struct BARTState {
     int n, p;
-    const float* X;     // row-major covariates [n x p]
+    QuantizedX   Xq;    // quantized covariates (owned)
     const float* y;     // outcomes [n]
 
     std::vector<Tree>               trees;
@@ -29,7 +30,6 @@ struct BARTState {
 
 // Reduced log marginal likelihood for a Gaussian constant leaf.
 // Cancels terms that are equal between split and no-split comparisons.
-// See stochtree leaf_model.h for derivation.
 inline float leaf_log_ml(float sum_y, int n, float sigma2, float tau) {
     return -0.5f * std::log(1.0f + tau * n / sigma2)
            + (tau * sum_y * sum_y) / (2.0f * sigma2 * (n * tau + sigma2));
@@ -40,7 +40,7 @@ void sample_sigma2(const float* resid, int n, float& sigma2,
                    const BARTConfig& cfg, RNG& rng);
 
 // Sample leaf values for all leaves of one tree (Gaussian posterior)
-void sample_leaves(Tree& tree, const float* X, const float* resid,
-                   int n, int p, float sigma2, const BARTConfig& cfg, RNG& rng);
+void sample_leaves(Tree& tree, const QuantizedX& Xq, const float* resid,
+                   int n, float sigma2, const BARTConfig& cfg, RNG& rng);
 
 } // namespace bart

@@ -11,6 +11,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Core library
 add_library(faststochtree
+    src/quantize.cpp
     src/mcmc.cpp
     src/sampler.cpp
 )
