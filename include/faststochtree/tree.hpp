@@ -82,16 +82,30 @@ struct Tree {
 
     std::vector<int> leaves() const {
         std::vector<int> r;
-        for (int k = 1; k <= full_size; k++)
-            if (is_leaf(k) && (k == 1 || !is_leaf(k >> 1))) r.push_back(k);
+        leaves(r);
         return r;
     }
 
     std::vector<int> leaf_parents() const {
         std::vector<int> r;
-        for (int k = 1; k <= half_size; k++)
-            if (!is_leaf(k) && is_leaf(2*k) && is_leaf(2*k+1)) r.push_back(k);
+        leaf_parents(r);
         return r;
+    }
+
+    // Out-parameter variants — write into pre-allocated buffer (no heap alloc).
+    // Parent-check scan: a phantom slot's parent is also a leaf, so excluding
+    // any k where is_leaf(k>>1) is true yields only reachable leaves — no DFS
+    // stack needed.
+    void leaves(std::vector<int>& out) const {
+        out.clear();
+        for (int k = 1; k <= full_size; k++)
+            if (is_leaf(k) && (k == 1 || !is_leaf(k >> 1))) out.push_back(k);
+    }
+
+    void leaf_parents(std::vector<int>& out) const {
+        out.clear();
+        for (int k = 1; k <= half_size; k++)
+            if (!is_leaf(k) && is_leaf(2*k) && is_leaf(2*k+1)) out.push_back(k);
     }
 };
 

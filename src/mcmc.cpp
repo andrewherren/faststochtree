@@ -1,5 +1,6 @@
 #include "faststochtree/mcmc.hpp"
 #include <cmath>
+#include <cstring>
 #include <vector>
 
 namespace bart {
@@ -12,8 +13,8 @@ static void propose_grow(Tree& tree, const QuantizedX& Xq, const float* resid,
                          const float* pred_off,
                          int n, float sigma2,
                          const BARTConfig& cfg, RNG& rng,
-                         float prob_grow, std::vector<int>& leaf_idx) {
-    auto ls         = tree.leaves();
+                         float prob_grow, std::vector<int>& leaf_idx,
+                         const std::vector<int>& ls) {
     int  num_leaves = (int)ls.size();
 
     int lk = ls[rng.randint(0, num_leaves)];
@@ -85,10 +86,9 @@ static void propose_grow(Tree& tree, const QuantizedX& Xq, const float* resid,
 static void propose_prune(Tree& tree, const float* resid, const float* pred_off,
                           int n, float sigma2,
                           const BARTConfig& cfg, RNG& rng,
-                          float prob_prune, std::vector<int>& leaf_idx) {
-    auto lps        = tree.leaf_parents();
+                          float prob_prune, std::vector<int>& leaf_idx,
+                          const std::vector<int>& lps, int num_leaves) {
     int  num_lp     = (int)lps.size();
-    int  num_leaves = (int)tree.leaves().size();
 
     int pk          = lps[rng.randint(0, num_lp)];
     int left_child  = 2 * pk;
@@ -142,9 +142,11 @@ static void propose_move(Tree& tree, const QuantizedX& Xq, const float* resid,
                          const float* pred_off,
                          int n, float sigma2,
                          const BARTConfig& cfg, RNG& rng,
-                         std::vector<int>& leaf_idx) {
-    auto ls  = tree.leaves();
-    auto lps = tree.leaf_parents();
+                         std::vector<int>& leaf_idx, Workspace& ws) {
+    tree.leaves(ws.leaves_buf);
+    tree.leaf_parents(ws.leaf_parents_buf);
+    const auto& ls  = ws.leaves_buf;
+    const auto& lps = ws.leaf_parents_buf;
 
     bool grow_possible = false;
     for (int lk : ls) {
@@ -162,9 +164,9 @@ static void propose_move(Tree& tree, const QuantizedX& Xq, const float* resid,
     float prob_prune = prune_possible ? (grow_possible  ? 0.5f : 1.0f) : 0.0f;
 
     if (rng.uniform() < prob_grow)
-        propose_grow(tree,  Xq, resid, pred_off, n, sigma2, cfg, rng, prob_grow,  leaf_idx);
+        propose_grow(tree,  Xq, resid, pred_off, n, sigma2, cfg, rng, prob_grow,  leaf_idx, ls);
     else
-        propose_prune(tree,     resid, pred_off, n, sigma2, cfg, rng, prob_prune, leaf_idx);
+        propose_prune(tree,     resid, pred_off, n, sigma2, cfg, rng, prob_prune, leaf_idx, lps, (int)ls.size());
 }
 
 // -----------------------------------------------------------------------
@@ -182,32 +184,34 @@ void sample_sigma2(const float* resid, int n, float& sigma2,
 
 void sample_leaves(Tree& tree, const float* resid, const float* pred_off,
                    int n, float sigma2, const BARTConfig& cfg, RNG& rng,
-                   const std::vector<int>& leaf_idx) {
+                   const std::vector<int>& leaf_idx, Workspace& ws) {
     float tau = cfg.leaf_prior_var;
     int   sz  = tree.full_size + 1;  // 128 for depth=6
 
-    // K=4 scatter lanes; scatter effective residual = resid[i] + pred_off[i]
-    float s0[128]={}, s1[128]={}, s2[128]={}, s3[128]={};
-    int   c0[128]={}, c1[128]={}, c2[128]={}, c3[128]={};
+    // Zero only the live portion of each lane (sz entries = 512 bytes each)
+    std::memset(ws.s0, 0, sz * sizeof(float)); std::memset(ws.s1, 0, sz * sizeof(float));
+    std::memset(ws.s2, 0, sz * sizeof(float)); std::memset(ws.s3, 0, sz * sizeof(float));
+    std::memset(ws.c0, 0, sz * sizeof(int));   std::memset(ws.c1, 0, sz * sizeof(int));
+    std::memset(ws.c2, 0, sz * sizeof(int));   std::memset(ws.c3, 0, sz * sizeof(int));
 
     int n4 = (n / 4) * 4;
     for (int i = 0; i < n4; i += 4) {
         int l0 = leaf_idx[i],   l1 = leaf_idx[i+1],
             l2 = leaf_idx[i+2], l3 = leaf_idx[i+3];
-        s0[l0] += resid[i]   + pred_off[i];   c0[l0]++;
-        s1[l1] += resid[i+1] + pred_off[i+1]; c1[l1]++;
-        s2[l2] += resid[i+2] + pred_off[i+2]; c2[l2]++;
-        s3[l3] += resid[i+3] + pred_off[i+3]; c3[l3]++;
+        ws.s0[l0] += resid[i]   + pred_off[i];   ws.c0[l0]++;
+        ws.s1[l1] += resid[i+1] + pred_off[i+1]; ws.c1[l1]++;
+        ws.s2[l2] += resid[i+2] + pred_off[i+2]; ws.c2[l2]++;
+        ws.s3[l3] += resid[i+3] + pred_off[i+3]; ws.c3[l3]++;
     }
     for (int i = n4; i < n; i++) {
         int k = leaf_idx[i];
-        s0[k] += resid[i] + pred_off[i]; c0[k]++;
+        ws.s0[k] += resid[i] + pred_off[i]; ws.c0[k]++;
     }
 
     for (int k = 1; k < sz; k++) {
-        int   cnt = c0[k] + c1[k] + c2[k] + c3[k];
+        int   cnt = ws.c0[k] + ws.c1[k] + ws.c2[k] + ws.c3[k];
         if (cnt == 0) continue;
-        float sum = s0[k] + s1[k] + s2[k] + s3[k];
+        float sum = ws.s0[k] + ws.s1[k] + ws.s2[k] + ws.s3[k];
         float post_mean = (tau * sum) / (cnt * tau + sigma2);
         float post_var  = (tau * sigma2) / (cnt * tau + sigma2);
         tree.leaf_value[k] = post_mean + std::sqrt(post_var) * rng.normal();
@@ -222,6 +226,9 @@ void init_state(BARTState& state, const BARTConfig& cfg, RNG& rng) {
     state.leaf_indices.assign(T, std::vector<int>(state.n, 1));  // all at root (node 1)
     state.residual.assign(state.y, state.y + state.n);
     state.sigma2 = 1.f;
+    // Pre-allocate workspace scratch buffers
+    state.ws.leaves_buf.reserve(state.trees[0].full_size + 1);
+    state.ws.leaf_parents_buf.reserve(state.trees[0].half_size + 1);
     (void)rng;
 }
 
@@ -229,10 +236,10 @@ void mcmc_sweep(BARTState& s, const BARTConfig& cfg, RNG& rng) {
     for (int t = 0; t < cfg.num_trees; t++) {
         // v10: no restore pass — pred[t] passed as offset into propose and scatter
         propose_move(s.trees[t], s.Xq, s.residual.data(), s.pred[t].data(),
-                     s.n, s.sigma2, cfg, rng, s.leaf_indices[t]);
+                     s.n, s.sigma2, cfg, rng, s.leaf_indices[t], s.ws);
 
         sample_leaves(s.trees[t], s.residual.data(), s.pred[t].data(),
-                      s.n, s.sigma2, cfg, rng, s.leaf_indices[t]);
+                      s.n, s.sigma2, cfg, rng, s.leaf_indices[t], s.ws);
 
         // Fused delta update: one pass instead of pred_update + subtract
         for (int i = 0; i < s.n; i++) {
