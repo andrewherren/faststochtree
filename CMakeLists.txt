@@ -13,6 +13,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 add_library(faststochtree
     src/quantize.cpp
     src/mcmc.cpp
+    src/gfr.cpp
     src/sampler.cpp
 )
 target_include_directories(faststochtree PUBLIC include)
