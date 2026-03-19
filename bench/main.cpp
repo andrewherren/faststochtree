@@ -57,7 +57,7 @@ int main(int argc, char** argv) {
 
     bart::RNG model_rng(seed + 1);
 
-    const char* tag = xbart ? "gfr-v7-feat-parallel" : "v11-zero-alloc";
+    const char* tag = xbart ? "gfr-v8-zero-alloc" : "v11-zero-alloc";
     printf("faststochtree %s benchmark (%s)\n", xbart ? "XBART" : "BART", tag);
     printf("  n_train=%d  n_test=%d  p=%d  trees=%d\n",
            n_train, n_test, p, num_trees);

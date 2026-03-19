@@ -5,6 +5,8 @@
 #include "faststochtree/thread_pool.hpp"
 #include <cstring>
 #include <memory>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 #include <cmath>
 
@@ -44,6 +46,23 @@ struct PresortedX {
     void build(const QuantizedX& Xq, int n, int p);
 };
 
+// Per-tree mutable copy of sorted_idx with [beg,end) range tracking per node.
+// Stored persistently in BARTState (gfr-v8) so working/ranges memory is
+// allocated once and reused across all tree rebuilds.
+struct TreePartition {
+    std::vector<std::vector<int>>                           working;  // [p][n]
+    std::vector<std::unordered_map<int,std::pair<int,int>>> ranges;   // [p][node→{beg,end}]
+
+    // Reinitialise for a new tree rebuild.  On first call: allocates and copies.
+    // On subsequent calls: reuses existing vector capacity (no malloc), copies data.
+    void reinit(const PresortedX& ps, int n, int p) {
+        working.resize(p);
+        for (int j = 0; j < p; j++) working[j] = ps.sorted_idx[j];
+        ranges.resize(p);
+        for (int j = 0; j < p; j++) { ranges[j].clear(); ranges[j].emplace(1, std::make_pair(0, n)); }
+    }
+};
+
 struct BARTState {
     int n, p;
     QuantizedX   Xq;    // quantized covariates (owned)
@@ -55,8 +74,9 @@ struct BARTState {
     std::vector<float>              residual;      // partial residual
     float                           sigma2;
     Workspace                       ws;
-    PresortedX                      presorted;     // built by init_gfr; empty for MCMC-only use
-    std::unique_ptr<ThreadPool>     thread_pool;   // optional; built by run_xbart for num_threads>1
+    PresortedX                      presorted;       // built by init_gfr; empty for MCMC-only use
+    TreePartition                   gfr_partition;   // persistent GFR workspace (gfr-v8)
+    std::unique_ptr<ThreadPool>     thread_pool;     // optional; built by run_xbart for num_threads>1
 };
 
 // Reduced log marginal likelihood for a Gaussian constant leaf.
