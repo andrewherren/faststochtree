@@ -26,6 +26,7 @@ int main(int argc, char** argv) {
     int   p              = atoi(get_arg(argc, argv, "p",        "50"));
     int   num_trees      = atoi(get_arg(argc, argv, "trees",    "200"));
     int   seed           = atoi(get_arg(argc, argv, "seed",     "12345"));
+    int   num_threads    = atoi(get_arg(argc, argv, "threads",  "1"));
     float sigma_true     = atof(get_arg(argc, argv, "sigma",    "1.0"));
 
     bool xbart = (strcmp(mode, "xbart") == 0);
@@ -52,10 +53,11 @@ int main(int argc, char** argv) {
     cfg.sigma2_shape   = 3.0f;
     cfg.sigma2_scale   = sigma_true * sigma_true;
     if (xbart) cfg.p_eval = (int)std::sqrt((float)p);  // default: sqrt(p) for XBART
+    cfg.num_threads = num_threads;
 
     bart::RNG model_rng(seed + 1);
 
-    const char* tag = xbart ? "gfr-v5-subsampling" : "v11-zero-alloc";
+    const char* tag = xbart ? "gfr-v6-node-parallel" : "v11-zero-alloc";
     printf("faststochtree %s benchmark (%s)\n", xbart ? "XBART" : "BART", tag);
     printf("  n_train=%d  n_test=%d  p=%d  trees=%d\n",
            n_train, n_test, p, num_trees);
