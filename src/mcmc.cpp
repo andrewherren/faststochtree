@@ -1,50 +1,54 @@
 #include "faststochtree/mcmc.hpp"
+#include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <numeric>
 #include <vector>
 
 namespace bart {
 
 // -----------------------------------------------------------------------
-// Grow proposal — uses cached leaf_idx; updates cache on acceptance
+// Grow proposal — v13: O(n_k) via flat_obs contiguous leaf segments
 // -----------------------------------------------------------------------
 
 static void propose_grow(Tree& tree, const QuantizedX& Xq, const float* resid,
-                         const float* pred_off,
-                         int n, float sigma2,
+                         const float* pred_off, float sigma2,
                          const BARTConfig& cfg, RNG& rng,
-                         float prob_grow, std::vector<int>& leaf_idx,
-                         std::vector<int>& leaf_counts,
+                         float prob_grow,
+                         std::vector<int>& flat_obs, std::vector<int>& leaf_start,
+                         std::vector<int>& leaf_idx,  std::vector<int>& leaf_counts,
                          const std::vector<int>& ls) {
-    int  num_leaves = (int)ls.size();
+    int num_leaves = (int)ls.size();
 
     int lk = ls[rng.randint(0, num_leaves)];
     if (lk > tree.half_size) return;
     int leaf_depth = Tree::depth_of(lk);
     int var        = rng.randint(0, Xq.p);
 
+    int beg = leaf_start[lk], n_k = leaf_counts[lk];
+
+    // O(n_k) pass 1: min/max of chosen variable over this leaf's obs
     uint8_t var_min = 255, var_max = 0;
-    for (int i = 0; i < n; i++) {
-        if (leaf_idx[i] == lk) {
-            uint8_t v = Xq.at(i, var);
-            if (v < var_min) var_min = v;
-            if (v > var_max) var_max = v;
-        }
+    for (int k = beg; k < beg + n_k; k++) {
+        uint8_t v = Xq.at(flat_obs[k], var);
+        if (v < var_min) var_min = v;
+        if (v > var_max) var_max = v;
     }
     if (var_max <= var_min) return;
 
     uint8_t threshold = (uint8_t)rng.randint((int)var_min, (int)var_max);
 
+    // O(n_k) pass 2: compute split statistics
     float left_sum = 0.f, right_sum = 0.f, node_sum = 0.f;
-    int   left_n   = 0,   right_n   = 0,   node_n   = 0;
-    for (int i = 0; i < n; i++) {
-        if (leaf_idx[i] == lk) {
-            float r = resid[i] + pred_off[i];
-            node_sum += r; node_n++;
-            if (Xq.at(i, var) <= threshold) { left_sum  += r; left_n++;  }
-            else                             { right_sum += r; right_n++; }
-        }
+    int   left_n   = 0,   right_n   = 0;
+    for (int k = beg; k < beg + n_k; k++) {
+        int   obs = flat_obs[k];
+        float r   = resid[obs] + pred_off[obs];
+        node_sum += r;
+        if (Xq.at(obs, var) <= threshold) { left_sum  += r; left_n++;  }
+        else                              { right_sum += r; right_n++; }
     }
+    int node_n = n_k;
 
     if (left_n < cfg.min_samples_leaf || right_n < cfg.min_samples_leaf) return;
 
@@ -73,46 +77,59 @@ static void propose_grow(Tree& tree, const QuantizedX& Xq, const float* resid,
 
     if (std::log(rng.uniform()) <= log_mh) {
         tree.grow(lk, var, threshold);
-        // Update cache: obs at lk routed to left (2*lk) or right (2*lk+1)
-        for (int i = 0; i < n; i++)
-            if (leaf_idx[i] == lk)
-                leaf_idx[i] = 2*lk + (Xq.at(i, var) > threshold ? 1 : 0);
-        leaf_counts[2*lk]     = left_n;
-        leaf_counts[2*lk + 1] = right_n;
-        leaf_counts[lk]       = 0;
+        // O(n_k) in-place partition of flat_obs[beg..beg+n_k)
+        auto split_it = std::partition(flat_obs.begin() + beg,
+                                       flat_obs.begin() + beg + n_k,
+                                       [&](int obs){ return Xq.at(obs, var) <= threshold; });
+        int split = (int)(split_it - flat_obs.begin());
+        leaf_start[2*lk]     = beg;
+        leaf_start[2*lk + 1] = split;
+        leaf_counts[2*lk]     = split - beg;
+        leaf_counts[2*lk + 1] = beg + n_k - split;
+        leaf_counts[lk]        = 0;
+        // Update leaf_idx: O(n_k) — still needed by sample_leaves
+        for (int k = beg;   k < split;       k++) leaf_idx[flat_obs[k]] = 2*lk;
+        for (int k = split; k < beg + n_k;   k++) leaf_idx[flat_obs[k]] = 2*lk + 1;
     }
 }
 
 // -----------------------------------------------------------------------
-// Prune proposal — uses cached leaf_idx; updates cache on acceptance
+// Prune proposal — v13: O(n_k) via flat_obs contiguous leaf segments
 // -----------------------------------------------------------------------
 
 static void propose_prune(Tree& tree, const float* resid, const float* pred_off,
-                          int n, float sigma2,
+                          float sigma2,
                           const BARTConfig& cfg, RNG& rng,
-                          float prob_prune, std::vector<int>& leaf_idx,
-                          std::vector<int>& leaf_counts,
+                          float prob_prune,
+                          std::vector<int>& flat_obs, std::vector<int>& leaf_start,
+                          std::vector<int>& leaf_idx,  std::vector<int>& leaf_counts,
                           const std::vector<int>& lps, int num_leaves) {
-    int  num_lp     = (int)lps.size();
+    int num_lp     = (int)lps.size();
 
     int pk          = lps[rng.randint(0, num_lp)];
     int left_child  = 2 * pk;
     int right_child = 2 * pk + 1;
     int leaf_depth  = Tree::depth_of(pk);
 
+    int beg_l = leaf_start[left_child],  n_l = leaf_counts[left_child];
+    int beg_r = leaf_start[right_child], n_r = leaf_counts[right_child];
+
+    // O(n_k) scan: sum left and right children's obs independently
     float left_sum = 0.f, right_sum = 0.f;
-    int   left_n   = 0,   right_n   = 0;
-    for (int i = 0; i < n; i++) {
-        float r = resid[i] + pred_off[i];
-        if      (leaf_idx[i] == left_child)  { left_sum  += r; left_n++;  }
-        else if (leaf_idx[i] == right_child) { right_sum += r; right_n++; }
+    for (int k = beg_l; k < beg_l + n_l; k++) {
+        int obs = flat_obs[k];
+        left_sum += resid[obs] + pred_off[obs];
+    }
+    for (int k = beg_r; k < beg_r + n_r; k++) {
+        int obs = flat_obs[k];
+        right_sum += resid[obs] + pred_off[obs];
     }
     float node_sum = left_sum + right_sum;
-    int   node_n   = left_n   + right_n;
+    int   node_n   = n_l + n_r;
 
-    float split_log_ml    = leaf_log_ml(left_sum,  left_n,  sigma2, cfg.leaf_prior_var)
-                          + leaf_log_ml(right_sum, right_n, sigma2, cfg.leaf_prior_var);
-    float no_split_log_ml = leaf_log_ml(node_sum,  node_n,  sigma2, cfg.leaf_prior_var);
+    float split_log_ml    = leaf_log_ml(left_sum,  n_l,    sigma2, cfg.leaf_prior_var)
+                          + leaf_log_ml(right_sum, n_r,    sigma2, cfg.leaf_prior_var);
+    float no_split_log_ml = leaf_log_ml(node_sum,  node_n, sigma2, cfg.leaf_prior_var);
 
     float pg  = cfg.alpha / std::pow(1.f + leaf_depth,     cfg.beta);
     float pgl = cfg.alpha / std::pow(1.f + leaf_depth + 1, cfg.beta);
@@ -132,13 +149,15 @@ static void propose_prune(Tree& tree, const float* resid, const float* pred_off,
 
     if (std::log(rng.uniform()) <= log_mh) {
         tree.prune(pk);
-        // Update cache: obs at 2*pk and 2*pk+1 merge back to pk
-        for (int i = 0; i < n; i++)
-            if (leaf_idx[i] == left_child || leaf_idx[i] == right_child)
-                leaf_idx[i] = pk;
-        leaf_counts[pk]          = node_n;
+        // Children's segments are always adjacent (beg_r == beg_l + n_l by construction)
+        // so parent just reclaims the combined range — no data movement needed.
+        leaf_start[pk]          = beg_l;
+        leaf_counts[pk]         = node_n;
         leaf_counts[left_child]  = 0;
         leaf_counts[right_child] = 0;
+        // Update leaf_idx: O(n_k) — still needed by sample_leaves
+        for (int k = beg_l; k < beg_l + n_l; k++) leaf_idx[flat_obs[k]] = pk;
+        for (int k = beg_r; k < beg_r + n_r; k++) leaf_idx[flat_obs[k]] = pk;
     }
 }
 
@@ -147,10 +166,10 @@ static void propose_prune(Tree& tree, const float* resid, const float* pred_off,
 // -----------------------------------------------------------------------
 
 static void propose_move(Tree& tree, const QuantizedX& Xq, const float* resid,
-                         const float* pred_off,
-                         int n, float sigma2,
+                         const float* pred_off, float sigma2,
                          const BARTConfig& cfg, RNG& rng,
-                         std::vector<int>& leaf_idx, std::vector<int>& leaf_counts,
+                         std::vector<int>& flat_obs, std::vector<int>& leaf_start,
+                         std::vector<int>& leaf_idx,  std::vector<int>& leaf_counts,
                          Workspace& ws) {
     tree.leaves(ws.leaves_buf);
     tree.leaf_parents(ws.leaf_parents_buf);
@@ -170,9 +189,11 @@ static void propose_move(Tree& tree, const QuantizedX& Xq, const float* resid,
     float prob_prune = prune_possible ? (grow_possible  ? 0.5f : 1.0f) : 0.0f;
 
     if (rng.uniform() < prob_grow)
-        propose_grow(tree,  Xq, resid, pred_off, n, sigma2, cfg, rng, prob_grow,  leaf_idx, leaf_counts, ls);
+        propose_grow(tree,  Xq, resid, pred_off, sigma2, cfg, rng, prob_grow,
+                     flat_obs, leaf_start, leaf_idx, leaf_counts, ls);
     else
-        propose_prune(tree,     resid, pred_off, n, sigma2, cfg, rng, prob_prune, leaf_idx, leaf_counts, lps, (int)ls.size());
+        propose_prune(tree,     resid, pred_off, sigma2, cfg, rng, prob_prune,
+                      flat_obs, leaf_start, leaf_idx, leaf_counts, lps, (int)ls.size());
 }
 
 // -----------------------------------------------------------------------
@@ -233,6 +254,9 @@ void init_state(BARTState& state, const BARTConfig& cfg, RNG& rng) {
     int sz = state.trees[0].full_size + 1;
     state.leaf_counts.assign(T, std::vector<int>(sz, 0));
     for (int t = 0; t < T; t++) state.leaf_counts[t][1] = state.n;  // all obs at root
+    state.flat_obs.assign(T, std::vector<int>(state.n));
+    for (int t = 0; t < T; t++) std::iota(state.flat_obs[t].begin(), state.flat_obs[t].end(), 0);
+    state.leaf_start.assign(T, std::vector<int>(sz, 0));  // leaf_start[t][1]=0 by default
     state.residual.assign(state.y, state.y + state.n);
     state.sigma2 = 1.f;
     // Pre-allocate workspace scratch buffers
@@ -244,9 +268,11 @@ void init_state(BARTState& state, const BARTConfig& cfg, RNG& rng) {
 
 void mcmc_sweep(BARTState& s, const BARTConfig& cfg, RNG& rng) {
     for (int t = 0; t < cfg.num_trees; t++) {
-        // v12: leaf_counts[t] eliminates O(n*leaves) grow_possible scan in propose_move
+        // v13: propose_grow/prune now O(n_k) via flat_obs contiguous leaf segments
         propose_move(s.trees[t], s.Xq, s.residual.data(), s.pred[t].data(),
-                     s.n, s.sigma2, cfg, rng, s.leaf_indices[t], s.leaf_counts[t], s.ws);
+                     s.sigma2, cfg, rng,
+                     s.flat_obs[t], s.leaf_start[t], s.leaf_indices[t], s.leaf_counts[t],
+                     s.ws);
 
         sample_leaves(s.trees[t], s.residual.data(), s.pred[t].data(),
                       s.n, s.sigma2, cfg, rng, s.leaf_indices[t], s.ws);
