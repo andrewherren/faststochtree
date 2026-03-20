@@ -88,6 +88,8 @@ struct BARTState {
     std::vector<std::vector<float>> pred;          // pred[t][i]: tree t's prediction for obs i
     std::vector<std::vector<int>>   leaf_indices;  // leaf_indices[t][i]: cached leaf node for obs i
     std::vector<std::vector<int>>   leaf_counts;   // leaf_counts[t][k]: # obs at node k in tree t
+    std::vector<std::vector<int>>   flat_obs;      // flat_obs[t]: obs indices grouped by leaf (contiguous segments)
+    std::vector<std::vector<int>>   leaf_start;    // leaf_start[t][k]: start index of leaf k in flat_obs[t]
     std::vector<float>              residual;      // partial residual
     float                           sigma2;
     Workspace                       ws;

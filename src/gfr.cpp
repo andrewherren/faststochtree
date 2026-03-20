@@ -234,6 +234,18 @@ void gfr_sweep(BARTState& state, const BARTConfig& cfg, RNG& rng) {
         std::fill(lc.begin(), lc.end(), 0);
         for (int i = 0; i < n; i++) lc[state.leaf_indices[t][i]]++;
 
+        // Rebuild flat_obs[t] and leaf_start[t]: counting sort, O(full_size + n)
+        auto& fo = state.flat_obs[t];
+        auto& ls = state.leaf_start[t];
+        int full_size = state.trees[t].full_size;
+        // Step 1: exclusive prefix sum of leaf_counts → leaf_start
+        int running = 0;
+        for (int k = 1; k <= full_size; k++) { ls[k] = running; running += lc[k]; }
+        // Step 2: scatter obs into flat_obs using leaf_start as write cursors
+        for (int i = 0; i < n; i++) fo[ls[state.leaf_indices[t][i]]++] = i;
+        // Restore leaf_start (each cursor advanced by lc[k])
+        for (int k = 1; k <= full_size; k++) ls[k] -= lc[k];
+
         // zeros as pred_off: residual already fully restored above
         sample_leaves(state.trees[t], state.residual.data(), state.ws.zeros.data(),
                       n, state.sigma2, cfg, rng, state.leaf_indices[t], state.ws);
