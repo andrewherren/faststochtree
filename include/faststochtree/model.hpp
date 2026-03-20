@@ -6,7 +6,6 @@
 #include <cstring>
 #include <memory>
 #include <numeric>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 #include <cmath>
@@ -49,7 +48,9 @@ struct Workspace {
 //                O(n_k) single obs-list partition.  No sorted-order copy needed.
 struct GFRHistWorkspace {
     std::vector<int>     flat_obs;        // [n] obs indices, partitioned in-place
-    std::unordered_map<int, std::pair<int,int>> node_range;  // node_k → {beg,end}
+    // node_range[k] = {beg,end} for active node k; beg==-1 means inactive.
+    // Flat vector indexed by node id (bounded by full_size) replaces unordered_map.
+    std::vector<std::pair<int,int>> node_range;
 
     std::vector<float>   sum_hists;       // [m_max * 256]: fi*256 + bin
     std::vector<int>     cnt_hists;       // [m_max * 256]
@@ -59,8 +60,9 @@ struct GFRHistWorkspace {
     std::vector<int>     right_buf;       // partition scratch
     std::vector<int>     feat_order;      // [p] Fisher-Yates scratch
 
-    void alloc(int n, int p) {
+    void alloc(int n, int p, int full_size) {
         flat_obs.resize(n);
+        node_range.assign(full_size + 1, {-1, -1});
         sum_hists.resize(p * 256);
         cnt_hists.resize(p * 256);
         feat_log_total.resize(p + 1);
@@ -72,8 +74,8 @@ struct GFRHistWorkspace {
 
     void reinit(int n) {
         std::iota(flat_obs.begin(), flat_obs.end(), 0);
-        node_range.clear();
-        node_range.emplace(1, std::make_pair(0, n));
+        std::fill(node_range.begin(), node_range.end(), std::make_pair(-1, -1));
+        node_range[1] = {0, n};
     }
 };
 
@@ -85,6 +87,7 @@ struct BARTState {
     std::vector<Tree>               trees;
     std::vector<std::vector<float>> pred;          // pred[t][i]: tree t's prediction for obs i
     std::vector<std::vector<int>>   leaf_indices;  // leaf_indices[t][i]: cached leaf node for obs i
+    std::vector<std::vector<int>>   leaf_counts;   // leaf_counts[t][k]: # obs at node k in tree t
     std::vector<float>              residual;      // partial residual
     float                           sigma2;
     Workspace                       ws;
