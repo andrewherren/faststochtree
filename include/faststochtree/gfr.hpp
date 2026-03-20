@@ -6,9 +6,10 @@
 namespace bart {
 
 // Grow tree from root using GFR (grow-from-root / XBART).
-// v9: 256-bin histograms + single obs-list partition.
-//   - No presorted copies: O(n_k*m) histogram build replaces O(n_k*p) sorted scan.
-//   - O(n_k) partition update (single obs list) replaces O(n_k*p) stable-partition.
+// v10: flat node_range array + 256-bin histograms + single obs-list partition.
+//   - node_range is a flat vector<pair<int,int>> (no hash overhead).
+//   - O(n_k*m) histogram build + O(256*m) prefix scan per node.
+//   - O(n_k) partition update (single obs list).
 //   - ws is a persistent workspace reused across calls (no per-call malloc).
 // pool=nullptr → single-threaded.
 void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,

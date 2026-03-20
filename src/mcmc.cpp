@@ -14,6 +14,7 @@ static void propose_grow(Tree& tree, const QuantizedX& Xq, const float* resid,
                          int n, float sigma2,
                          const BARTConfig& cfg, RNG& rng,
                          float prob_grow, std::vector<int>& leaf_idx,
+                         std::vector<int>& leaf_counts,
                          const std::vector<int>& ls) {
     int  num_leaves = (int)ls.size();
 
@@ -76,6 +77,9 @@ static void propose_grow(Tree& tree, const QuantizedX& Xq, const float* resid,
         for (int i = 0; i < n; i++)
             if (leaf_idx[i] == lk)
                 leaf_idx[i] = 2*lk + (Xq.at(i, var) > threshold ? 1 : 0);
+        leaf_counts[2*lk]     = left_n;
+        leaf_counts[2*lk + 1] = right_n;
+        leaf_counts[lk]       = 0;
     }
 }
 
@@ -87,6 +91,7 @@ static void propose_prune(Tree& tree, const float* resid, const float* pred_off,
                           int n, float sigma2,
                           const BARTConfig& cfg, RNG& rng,
                           float prob_prune, std::vector<int>& leaf_idx,
+                          std::vector<int>& leaf_counts,
                           const std::vector<int>& lps, int num_leaves) {
     int  num_lp     = (int)lps.size();
 
@@ -131,6 +136,9 @@ static void propose_prune(Tree& tree, const float* resid, const float* pred_off,
         for (int i = 0; i < n; i++)
             if (leaf_idx[i] == left_child || leaf_idx[i] == right_child)
                 leaf_idx[i] = pk;
+        leaf_counts[pk]          = node_n;
+        leaf_counts[left_child]  = 0;
+        leaf_counts[right_child] = 0;
     }
 }
 
@@ -142,7 +150,8 @@ static void propose_move(Tree& tree, const QuantizedX& Xq, const float* resid,
                          const float* pred_off,
                          int n, float sigma2,
                          const BARTConfig& cfg, RNG& rng,
-                         std::vector<int>& leaf_idx, Workspace& ws) {
+                         std::vector<int>& leaf_idx, std::vector<int>& leaf_counts,
+                         Workspace& ws) {
     tree.leaves(ws.leaves_buf);
     tree.leaf_parents(ws.leaf_parents_buf);
     const auto& ls  = ws.leaves_buf;
@@ -151,10 +160,7 @@ static void propose_move(Tree& tree, const QuantizedX& Xq, const float* resid,
     bool grow_possible = false;
     for (int lk : ls) {
         if (lk > tree.half_size) continue;
-        int cnt = 0;
-        for (int i = 0; i < n; i++)
-            if (leaf_idx[i] == lk) cnt++;
-        if (cnt >= 2 * cfg.min_samples_leaf) { grow_possible = true; break; }
+        if (leaf_counts[lk] >= 2 * cfg.min_samples_leaf) { grow_possible = true; break; }
     }
     bool prune_possible = !lps.empty();
 
@@ -164,9 +170,9 @@ static void propose_move(Tree& tree, const QuantizedX& Xq, const float* resid,
     float prob_prune = prune_possible ? (grow_possible  ? 0.5f : 1.0f) : 0.0f;
 
     if (rng.uniform() < prob_grow)
-        propose_grow(tree,  Xq, resid, pred_off, n, sigma2, cfg, rng, prob_grow,  leaf_idx, ls);
+        propose_grow(tree,  Xq, resid, pred_off, n, sigma2, cfg, rng, prob_grow,  leaf_idx, leaf_counts, ls);
     else
-        propose_prune(tree,     resid, pred_off, n, sigma2, cfg, rng, prob_prune, leaf_idx, lps, (int)ls.size());
+        propose_prune(tree,     resid, pred_off, n, sigma2, cfg, rng, prob_prune, leaf_idx, leaf_counts, lps, (int)ls.size());
 }
 
 // -----------------------------------------------------------------------
@@ -224,6 +230,9 @@ void init_state(BARTState& state, const BARTConfig& cfg, RNG& rng) {
     for (int t = 0; t < T; t++) state.trees.emplace_back(cfg.tree_depth);
     state.pred.assign(T, std::vector<float>(state.n, 0.f));
     state.leaf_indices.assign(T, std::vector<int>(state.n, 1));  // all at root (node 1)
+    int sz = state.trees[0].full_size + 1;
+    state.leaf_counts.assign(T, std::vector<int>(sz, 0));
+    for (int t = 0; t < T; t++) state.leaf_counts[t][1] = state.n;  // all obs at root
     state.residual.assign(state.y, state.y + state.n);
     state.sigma2 = 1.f;
     // Pre-allocate workspace scratch buffers
@@ -235,9 +244,9 @@ void init_state(BARTState& state, const BARTConfig& cfg, RNG& rng) {
 
 void mcmc_sweep(BARTState& s, const BARTConfig& cfg, RNG& rng) {
     for (int t = 0; t < cfg.num_trees; t++) {
-        // v10: no restore pass — pred[t] passed as offset into propose and scatter
+        // v12: leaf_counts[t] eliminates O(n*leaves) grow_possible scan in propose_move
         propose_move(s.trees[t], s.Xq, s.residual.data(), s.pred[t].data(),
-                     s.n, s.sigma2, cfg, rng, s.leaf_indices[t], s.ws);
+                     s.n, s.sigma2, cfg, rng, s.leaf_indices[t], s.leaf_counts[t], s.ws);
 
         sample_leaves(s.trees[t], s.residual.data(), s.pred[t].data(),
                       s.n, s.sigma2, cfg, rng, s.leaf_indices[t], s.ws);

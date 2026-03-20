@@ -66,7 +66,7 @@ BARTResult run_xbart(const float* X,      const float* y, int n, int p,
     state.y  = y;
 
     init_state(state, cfg, rng);
-    state.gfr_hist_ws.alloc(n, p);  // allocate persistent histogram workspace
+    state.gfr_hist_ws.alloc(n, p, state.trees[0].full_size);  // allocate persistent histogram workspace
     if (cfg.num_threads > 1)
         state.thread_pool = std::make_unique<ThreadPool>(cfg.num_threads);
 

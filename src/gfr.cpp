@@ -9,22 +9,20 @@
 namespace bart {
 
 // -----------------------------------------------------------------------
-// grow_tree_gfr (v9) — 256-bin histogram GFR
+// grow_tree_gfr (v10) — flat node_range array
 //
-// Key design changes vs v8:
-//   1. No PresortedX / TreePartition.  A single flat_obs list (unordered)
-//      is partitioned in-place at each split — O(n_k), not O(n_k * p).
-//   2. Per-node histogram scan: for each of the m sampled features build
-//      a 256-bin sum/count histogram in O(n_k), then prefix-scan in O(256)
-//      to compute the feature's log-total and collect stage-2 candidates.
-//      Total per-node: O(n_k * m + 256 * m) vs O(n_k * m) previously,
-//      but the constant is far smaller (cache-friendly linear scan).
-//   3. Stage 1 (feature sampling) + Stage 2 (cutpoint sampling) are now
-//      fused: a single histogram pass builds both the feature log-total
-//      (used in stage 1) and records per-bin log-weights for stage 2.
-//      For the chosen feature a second prefix-scan (O(256)) replaces the
-//      pass-2 re-scan over sorted obs.
-//   4. ws is a persistent GFRHistWorkspace — no per-call heap allocation.
+// Key design changes vs v9:
+//   5. node_range: unordered_map<int,pair<int,int>> replaced by flat
+//      vector<pair<int,int>> indexed directly by node id (bounded by
+//      full_size = 2^(depth+1)-1).  Eliminates hash overhead on every
+//      node lookup, insert, and erase.  Sentinel beg==-1 marks inactive.
+//
+// Retained from v9:
+//   1. Single flat_obs list partitioned in-place — O(n_k), not O(n_k*p).
+//   2. 256-bin sum/count histograms per feature — O(n_k*m) build,
+//      O(256*m) prefix scan.
+//   3. Fused stage-1/stage-2: one histogram pass, O(256) stage-2 rescan.
+//   4. Persistent GFRHistWorkspace — no per-call heap allocation.
 //
 // Parallelism: pool->parallel_for(0, m, hist_build) when m*n_k > 200,000.
 //   Each feature fi owns ws.sum_hists[fi*256..] and ws.cnt_hists[fi*256..]
@@ -49,14 +47,14 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
         std::vector<int> next_level;
 
         for (int node_k : current_level) {
-            auto it = ws.node_range.find(node_k);
-            if (it == ws.node_range.end()) continue;
-            int beg = it->second.first, end = it->second.second;
+            auto& nr = ws.node_range[node_k];
+            if (nr.first == -1) continue;
+            int beg = nr.first, end = nr.second;
             int n_k = end - beg;
             int depth = Tree::depth_of(node_k);
 
             if (n_k < 2 * cfg.min_samples_leaf || depth >= tree.depth - 1) {
-                ws.node_range.erase(it);
+                nr.first = -1;
                 continue;
             }
 
@@ -143,7 +141,7 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
                 if (u1 <= cum1) { chosen_fi = fi; break; }
             }
             if (chosen_fi == m) {
-                ws.node_range.erase(it);
+                nr.first = -1;
                 continue;  // no split
             }
             int chosen_feat = ws.feat_order[chosen_fi];
@@ -171,7 +169,7 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
             }
 
             if (ws.cut_thresh_buf.empty()) {
-                ws.node_range.erase(it);
+                nr.first = -1;
                 continue;  // degenerate: all obs in one bin
             }
 
@@ -201,9 +199,9 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
             int left_end = write;
             for (int obs : ws.right_buf) ws.flat_obs[write++] = obs;
 
-            ws.node_range.erase(it);
-            if (left_end > beg)          ws.node_range.emplace(2 * node_k,     std::make_pair(beg, left_end));
-            if (write > left_end)        ws.node_range.emplace(2 * node_k + 1, std::make_pair(left_end, end));
+            nr.first = -1;
+            if (left_end > beg)   ws.node_range[2 * node_k]     = {beg, left_end};
+            if (write > left_end) ws.node_range[2 * node_k + 1] = {left_end, end};
 
             next_level.push_back(2 * node_k);
             next_level.push_back(2 * node_k + 1);
@@ -230,6 +228,11 @@ void gfr_sweep(BARTState& state, const BARTConfig& cfg, RNG& rng) {
         // Rebuild leaf index cache — tree was rebuilt from scratch
         for (int i = 0; i < n; i++)
             state.leaf_indices[t][i] = state.trees[t].traverse(xq, i, n);
+
+        // Rebuild leaf counts from the updated leaf_indices
+        auto& lc = state.leaf_counts[t];
+        std::fill(lc.begin(), lc.end(), 0);
+        for (int i = 0; i < n; i++) lc[state.leaf_indices[t][i]]++;
 
         // zeros as pred_off: residual already fully restored above
         sample_leaves(state.trees[t], state.residual.data(), state.ws.zeros.data(),
