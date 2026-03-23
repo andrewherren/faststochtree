@@ -33,6 +33,49 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(googletest)
 
+# ── stochtree comparison benchmark ───────────────────────────────────────────
+# Builds a second benchmark binary using stochtree (the reference BART impl)
+# on identical simulated data for an apples-to-apples speed comparison.
+# Fetches stochtree + its submodule dependencies from GitHub on first build
+# (~200 MB download; cached under .cmake-fetch-cache/ on subsequent builds).
+#
+# Enable with:  cmake -DBUILD_STOCHTREE_COMPARE=ON ...
+# Local override: cmake -DBUILD_STOCHTREE_COMPARE=ON -DSTOCHTREE_SOURCE_DIR=/path/to/stochtree ...
+option(BUILD_STOCHTREE_COMPARE "Build stochtree comparison benchmark" OFF)
+
+if(BUILD_STOCHTREE_COMPARE)
+    # Prevent stochtree from building targets we don't need.
+    set(BUILD_DEBUG_TARGETS OFF CACHE BOOL "" FORCE)
+    set(BUILD_PYTHON        OFF CACHE BOOL "" FORCE)
+    set(BUILD_TEST          OFF CACHE BOOL "" FORCE)
+    # Apple Clang doesn't ship with OpenMP; disable to avoid build errors on macOS.
+    set(USE_OPENMP          OFF CACHE BOOL "" FORCE)
+
+    if(DEFINED STOCHTREE_SOURCE_DIR)
+        message(STATUS "stochtree: using local source at ${STOCHTREE_SOURCE_DIR}")
+        FetchContent_Declare(stochtree SOURCE_DIR "${STOCHTREE_SOURCE_DIR}")
+    else()
+        FetchContent_Declare(
+            stochtree
+            GIT_REPOSITORY    https://github.com/StochasticTree/stochtree.git
+            GIT_TAG           main
+            GIT_SUBMODULES_RECURSE TRUE
+        )
+    endif()
+
+    FetchContent_MakeAvailable(stochtree)
+
+    add_executable(stochtree_compare bench/stochtree_compare.cpp)
+    target_link_libraries(stochtree_compare PRIVATE stochtree_objs)
+    target_include_directories(stochtree_compare PRIVATE
+        ${stochtree_SOURCE_DIR}/include
+        ${stochtree_SOURCE_DIR}/deps/eigen
+        ${stochtree_SOURCE_DIR}/deps/boost_math/include
+        ${stochtree_SOURCE_DIR}/deps/fmt/include
+        ${stochtree_SOURCE_DIR}/deps/fast_double_parser/include
+    )
+endif()
+
 add_executable(test_bart tests/test_bart.cpp)
 target_link_libraries(test_bart PRIVATE faststochtree GTest::gtest_main)
 include(GoogleTest)
