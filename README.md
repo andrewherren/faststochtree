@@ -59,3 +59,9 @@ Or by running the GoogleTest binary directly for more verbose output
 ```bash
 ./build-release/test_bart
 ```
+
+```
+./bench/run_suite.sh \
+  --tags v5-fixed-depth,v6-branchless,v7-leaf-cache,v8-scatter-buffer,v9-multilane,v10-fused-gather,v11-zero-alloc \
+  --n 50000 --p 50 --timeout 300
+```

@@ -42,9 +42,14 @@
 
 # Build directories
 build-*/
+.bench-builds/
+.cmake-fetch-cache/
 
 # Local agent notes and planning
 .claude/
+
+# Benchmark results (machine-specific; commit selectively if desired)
+bench/results/
 
 # IDE files
 .vscode
