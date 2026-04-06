@@ -61,6 +61,7 @@ write_csv_row <- function(tag, iter, ms, rmse) {
                      tag, ts, n_train, p, num_trees,
                      n_burnin, n_samples, iter, n_iters, ms, rmse),
              csv_con)
+  flush(csv_con)
 }
 
 db_ms   <- numeric(n_iters);  db_rmse   <- numeric(n_iters)
