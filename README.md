@@ -204,7 +204,7 @@ Rscript bench/bench_stochtree_r.R --mode xbart
 Rscript bench/bench_stochtree_r.R --n_train 10000 --p 10 --iters 5
 ```
 
-### dbarts and BART — `bench/bench_r_packages.R`
+### dbarts, BART, and flexBART — `bench/bench_r_packages.R`
 
 Times `dbarts`, `BART`, and `flexBART` implementations of the BART model back-to-back on the same data each iteration (MCMC only; none of these packages offer GFR).
 
