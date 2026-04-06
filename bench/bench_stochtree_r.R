@@ -125,6 +125,7 @@ for (iter in seq_len(n_iters)) {
                      csv_tag, ts, mode, n_train, p, num_trees,
                      n_burnin, n_samples, 1L, iter, n_iters, ms, rmse),
              csv_con)
+  flush(csv_con)
 }
 
 close(csv_con)
