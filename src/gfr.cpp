@@ -38,7 +38,7 @@ static const Compress8Table compress8;
 namespace bart {
 
 // -----------------------------------------------------------------------
-// grow_tree_gfr (v12) — NEON compress partition + prefetch histogram
+// grow_tree_gfr (v13) — 4-way histogram + NEON compress partition
 //
 // Key design changes vs v9:
 //   5. node_range: unordered_map<int,pair<int,int>> replaced by flat
@@ -118,42 +118,50 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
                 int j = ws.feat_order[fi];
                 float* sh = ws.sum_hists.data() + fi * 256;
                 int*   ch = ws.cnt_hists.data() + fi * 256;
-                std::fill(sh, sh + 256, 0.f);
-                std::fill(ch, ch + 256, 0);
 
-                // Build histogram over obs in [beg, end)
-                // Prefetch + 4x unroll to hide indirect-load latency.
-                // Gate on n_k: below ~128 obs the overhead isn't worth it.
+                // 4-way histogram: four independent accumulators keyed by
+                // k%4 eliminate bin-conflict RAW hazards (two consecutive
+                // obs landing on the same bin create a read-after-write
+                // stall in the single-accumulator version).
+                // Stack arrays are zero-inited (compiler uses NEON bzero);
+                // merged into sh/ch with a sequential O(256) pass at the end.
+                const uint8_t* col = Xq.data.data() + j * Xq.n;
                 constexpr int PF = 12;
+
+                float sh0[256]={}, sh1[256]={}, sh2[256]={}, sh3[256]={};
+                int   ch0[256]={}, ch1[256]={}, ch2[256]={}, ch3[256]={};
+
                 int hk = beg;
-                if (n_k >= 128) {
-                    const uint8_t* col = Xq.data.data() + j * Xq.n;
-                    for (; hk + 3 < end; hk += 4) {
-                        if (hk + PF + 3 < end) {
-                            __builtin_prefetch(col + ws.flat_obs[hk + PF],     0, 1);
-                            __builtin_prefetch(col + ws.flat_obs[hk + PF + 1], 0, 1);
-                            __builtin_prefetch(col + ws.flat_obs[hk + PF + 2], 0, 1);
-                            __builtin_prefetch(col + ws.flat_obs[hk + PF + 3], 0, 1);
-                            __builtin_prefetch(resid + ws.flat_obs[hk + PF],     0, 1);
-                            __builtin_prefetch(resid + ws.flat_obs[hk + PF + 1], 0, 1);
-                            __builtin_prefetch(resid + ws.flat_obs[hk + PF + 2], 0, 1);
-                            __builtin_prefetch(resid + ws.flat_obs[hk + PF + 3], 0, 1);
-                        }
-                        int o0 = ws.flat_obs[hk],   o1 = ws.flat_obs[hk+1];
-                        int o2 = ws.flat_obs[hk+2], o3 = ws.flat_obs[hk+3];
-                        uint8_t b0 = col[o0], b1 = col[o1];
-                        uint8_t b2 = col[o2], b3 = col[o3];
-                        sh[b0] += resid[o0]; ch[b0]++;
-                        sh[b1] += resid[o1]; ch[b1]++;
-                        sh[b2] += resid[o2]; ch[b2]++;
-                        sh[b3] += resid[o3]; ch[b3]++;
+                for (; hk + 3 < end; hk += 4) {
+                    if (hk + PF + 3 < end) {
+                        __builtin_prefetch(col   + ws.flat_obs[hk + PF],     0, 1);
+                        __builtin_prefetch(col   + ws.flat_obs[hk + PF + 1], 0, 1);
+                        __builtin_prefetch(col   + ws.flat_obs[hk + PF + 2], 0, 1);
+                        __builtin_prefetch(col   + ws.flat_obs[hk + PF + 3], 0, 1);
+                        __builtin_prefetch(resid + ws.flat_obs[hk + PF],     0, 1);
+                        __builtin_prefetch(resid + ws.flat_obs[hk + PF + 1], 0, 1);
+                        __builtin_prefetch(resid + ws.flat_obs[hk + PF + 2], 0, 1);
+                        __builtin_prefetch(resid + ws.flat_obs[hk + PF + 3], 0, 1);
                     }
+                    int o0 = ws.flat_obs[hk],   o1 = ws.flat_obs[hk+1];
+                    int o2 = ws.flat_obs[hk+2], o3 = ws.flat_obs[hk+3];
+                    uint8_t b0 = col[o0], b1 = col[o1];
+                    uint8_t b2 = col[o2], b3 = col[o3];
+                    sh0[b0] += resid[o0]; ch0[b0]++;
+                    sh1[b1] += resid[o1]; ch1[b1]++;
+                    sh2[b2] += resid[o2]; ch2[b2]++;
+                    sh3[b3] += resid[o3]; ch3[b3]++;
                 }
                 for (; hk < end; hk++) {
                     int obs = ws.flat_obs[hk];
-                    uint8_t bin = Xq.at(obs, j);
-                    sh[bin] += resid[obs];
-                    ch[bin]++;
+                    uint8_t bin = col[obs];
+                    sh0[bin] += resid[obs]; ch0[bin]++;
+                }
+
+                // Merge lanes → sh/ch (sequential; auto-vectorized)
+                for (int b = 0; b < 256; b++) {
+                    sh[b] = sh0[b] + sh1[b] + sh2[b] + sh3[b];
+                    ch[b] = ch0[b] + ch1[b] + ch2[b] + ch3[b];
                 }
 
                 // Prefix scan: online LSE over valid split points
