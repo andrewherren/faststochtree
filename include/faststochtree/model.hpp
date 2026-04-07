@@ -52,6 +52,13 @@ struct GFRHistWorkspace {
     // Flat vector indexed by node id (bounded by full_size) replaces unordered_map.
     std::vector<std::pair<int,int>> node_range;
 
+    // leaf_segs: populated by grow_tree_gfr at each leaf exit point.
+    // Records (node, beg, end) for every leaf that retains observations,
+    // so gfr_sweep can rebuild leaf_indices/flat_obs/leaf_counts without
+    // re-traversing the tree.
+    struct LeafSeg { int node, beg, end; };
+    std::vector<LeafSeg> leaf_segs;
+
     std::vector<float>   sum_hists;       // [m_max * 256]: fi*256 + bin
     std::vector<int>     cnt_hists;       // [m_max * 256]
     std::vector<float>   feat_log_total;  // [m_max + 1]
@@ -63,6 +70,7 @@ struct GFRHistWorkspace {
     void alloc(int n, int p, int full_size) {
         flat_obs.resize(n);
         node_range.assign(full_size + 1, {-1, -1});
+        leaf_segs.reserve(full_size / 2 + 1);
         sum_hists.resize(p * 256);
         cnt_hists.resize(p * 256);
         feat_log_total.resize(p + 1);
@@ -76,6 +84,7 @@ struct GFRHistWorkspace {
         std::iota(flat_obs.begin(), flat_obs.end(), 0);
         std::fill(node_range.begin(), node_range.end(), std::make_pair(-1, -1));
         node_range[1] = {0, n};
+        leaf_segs.clear();
     }
 };
 
