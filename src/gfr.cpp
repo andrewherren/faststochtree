@@ -6,10 +6,39 @@
 #include <numeric>
 #include <vector>
 
+#ifdef __ARM_NEON
+#include <arm_neon.h>
+// compress8: lookup table for branchless 8-lane compress (NEON partition).
+// compress8.idx[mask] — source indices permuted so set-bit lanes (left obs)
+//   come first, then clear-bit lanes (right obs).
+// compress8.cnt[mask] — number of set bits (obs going left).
+// 256 entries × 8 bytes = 2 KB; fits comfortably in L1.
+namespace {
+struct Compress8Table {
+    uint8_t idx[256][8];
+    int     cnt[256];
+    Compress8Table() noexcept {
+        for (int mask = 0; mask < 256; mask++) {
+            int nl = 0, nr = 0;
+            uint8_t left[8], right[8];
+            for (int i = 0; i < 8; i++) {
+                if (mask & (1 << i)) left[nl++]  = (uint8_t)i;
+                else                 right[nr++] = (uint8_t)i;
+            }
+            cnt[mask] = nl;
+            for (int i = 0; i < nl; i++) idx[mask][i]      = left[i];
+            for (int i = 0; i < nr; i++) idx[mask][nl + i] = right[i];
+        }
+    }
+};
+static const Compress8Table compress8;
+} // namespace
+#endif // __ARM_NEON
+
 namespace bart {
 
 // -----------------------------------------------------------------------
-// grow_tree_gfr (v10) — flat node_range array
+// grow_tree_gfr (v12) — NEON compress partition + prefetch histogram
 //
 // Key design changes vs v9:
 //   5. node_range: unordered_map<int,pair<int,int>> replaced by flat
@@ -216,15 +245,65 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
             // ---------------------------------------------------------------
             tree.grow(node_k, chosen_feat, thresh);
 
+            const uint8_t* col = Xq.data.data() + chosen_feat * Xq.n;
             ws.right_buf.clear();
+            ws.right_buf.reserve(n_k);
             int write = beg;
-            for (int k = beg; k < end; k++) {
-                int obs = ws.flat_obs[k];
-                if (Xq.at(obs, chosen_feat) <= thresh) ws.flat_obs[write++] = obs;
-                else ws.right_buf.push_back(obs);
+
+#ifdef __ARM_NEON
+            // Branchless NEON compress partition (gated on n_k >= 16).
+            // Processes 8 obs per iteration: gathers bin values, compares
+            // against thresh as a vector, extracts a scalar bitmask, then
+            // routes left/right obs via the compress8 lookup table.
+            // Eliminates data-dependent branch mispredictions (~50% miss
+            // rate for balanced splits).
+            if (n_k >= 16) {
+                static const uint8_t pow2[8] = {1, 2, 4, 8, 16, 32, 64, 128};
+                uint8x8_t vpow2   = vld1_u8(pow2);
+                uint8x8_t vthresh = vdup_n_u8(thresh);
+                constexpr int PPF = 12;
+
+                int k = beg;
+                for (; k + 7 < end; k += 8) {
+                    if (k + PPF + 7 < end) {
+                        __builtin_prefetch(col + ws.flat_obs[k + PPF],     0, 1);
+                        __builtin_prefetch(col + ws.flat_obs[k + PPF + 4], 0, 1);
+                    }
+                    int obs[8];
+                    uint8_t bins[8];
+                    for (int i = 0; i < 8; i++) {
+                        obs[i]  = ws.flat_obs[k + i];
+                        bins[i] = col[obs[i]];
+                    }
+                    uint8x8_t vcmp = vcle_u8(vld1_u8(bins), vthresh);
+                    uint8_t mask   = vaddv_u8(vand_u8(vcmp, vpow2));
+                    int nl = compress8.cnt[mask];
+                    const uint8_t* shuf = compress8.idx[mask];
+                    for (int i = 0;  i < nl; i++) ws.flat_obs[write++]     = obs[shuf[i]];
+                    for (int i = nl; i < 8;  i++) ws.right_buf.push_back(obs[shuf[i]]);
+                }
+                for (; k < end; k++) {
+                    int ob = ws.flat_obs[k];
+                    if (col[ob] <= thresh) ws.flat_obs[write++] = ob;
+                    else                   ws.right_buf.push_back(ob);
+                }
+            } else {
+                for (int k = beg; k < end; k++) {
+                    int ob = ws.flat_obs[k];
+                    if (col[ob] <= thresh) ws.flat_obs[write++] = ob;
+                    else                   ws.right_buf.push_back(ob);
+                }
             }
+#else
+            for (int k = beg; k < end; k++) {
+                int ob = ws.flat_obs[k];
+                if (col[ob] <= thresh) ws.flat_obs[write++] = ob;
+                else                   ws.right_buf.push_back(ob);
+            }
+#endif // __ARM_NEON
+
             int left_end = write;
-            for (int obs : ws.right_buf) ws.flat_obs[write++] = obs;
+            for (int ob : ws.right_buf) ws.flat_obs[write++] = ob;
 
             nr.first = -1;
             if (left_end > beg)   ws.node_range[2 * node_k]     = {beg, left_end};
