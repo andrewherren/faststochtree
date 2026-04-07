@@ -93,8 +93,35 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
                 std::fill(ch, ch + 256, 0);
 
                 // Build histogram over obs in [beg, end)
-                for (int k = beg; k < end; k++) {
-                    int obs = ws.flat_obs[k];
+                // Prefetch + 4x unroll to hide indirect-load latency.
+                // Gate on n_k: below ~128 obs the overhead isn't worth it.
+                constexpr int PF = 12;
+                int hk = beg;
+                if (n_k >= 128) {
+                    const uint8_t* col = Xq.data.data() + j * Xq.n;
+                    for (; hk + 3 < end; hk += 4) {
+                        if (hk + PF + 3 < end) {
+                            __builtin_prefetch(col + ws.flat_obs[hk + PF],     0, 1);
+                            __builtin_prefetch(col + ws.flat_obs[hk + PF + 1], 0, 1);
+                            __builtin_prefetch(col + ws.flat_obs[hk + PF + 2], 0, 1);
+                            __builtin_prefetch(col + ws.flat_obs[hk + PF + 3], 0, 1);
+                            __builtin_prefetch(resid + ws.flat_obs[hk + PF],     0, 1);
+                            __builtin_prefetch(resid + ws.flat_obs[hk + PF + 1], 0, 1);
+                            __builtin_prefetch(resid + ws.flat_obs[hk + PF + 2], 0, 1);
+                            __builtin_prefetch(resid + ws.flat_obs[hk + PF + 3], 0, 1);
+                        }
+                        int o0 = ws.flat_obs[hk],   o1 = ws.flat_obs[hk+1];
+                        int o2 = ws.flat_obs[hk+2], o3 = ws.flat_obs[hk+3];
+                        uint8_t b0 = col[o0], b1 = col[o1];
+                        uint8_t b2 = col[o2], b3 = col[o3];
+                        sh[b0] += resid[o0]; ch[b0]++;
+                        sh[b1] += resid[o1]; ch[b1]++;
+                        sh[b2] += resid[o2]; ch[b2]++;
+                        sh[b3] += resid[o3]; ch[b3]++;
+                    }
+                }
+                for (; hk < end; hk++) {
+                    int obs = ws.flat_obs[hk];
                     uint8_t bin = Xq.at(obs, j);
                     sh[bin] += resid[obs];
                     ch[bin]++;
