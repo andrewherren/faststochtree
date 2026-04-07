@@ -83,6 +83,7 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
             int depth = Tree::depth_of(node_k);
 
             if (n_k < 2 * cfg.min_samples_leaf || depth >= tree.depth - 1) {
+                ws.leaf_segs.push_back({node_k, beg, end});
                 nr.first = -1;
                 continue;
             }
@@ -197,6 +198,7 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
                 if (u1 <= cum1) { chosen_fi = fi; break; }
             }
             if (chosen_fi == m) {
+                ws.leaf_segs.push_back({node_k, beg, end});
                 nr.first = -1;
                 continue;  // no split
             }
@@ -225,6 +227,7 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
             }
 
             if (ws.cut_thresh_buf.empty()) {
+                ws.leaf_segs.push_back({node_k, beg, end});
                 nr.first = -1;
                 continue;  // degenerate: all obs in one bin
             }
@@ -322,7 +325,6 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
 
 void gfr_sweep(BARTState& state, const BARTConfig& cfg, RNG& rng) {
     int T = cfg.num_trees, n = state.n;
-    const uint8_t* xq = state.Xq.data.data();
 
     for (int t = 0; t < T; t++) {
         for (int i = 0; i < n; i++) state.residual[i] += state.pred[t][i];
@@ -331,26 +333,31 @@ void gfr_sweep(BARTState& state, const BARTConfig& cfg, RNG& rng) {
                       n, state.p, state.sigma2, cfg, rng,
                       state.gfr_hist_ws, state.thread_pool.get());
 
-        // Rebuild leaf index cache — tree was rebuilt from scratch
-        for (int i = 0; i < n; i++)
-            state.leaf_indices[t][i] = state.trees[t].traverse(xq, i, n);
-
-        // Rebuild leaf counts from the updated leaf_indices
+        // Rebuild leaf state from GFR workspace — no re-traversal needed.
+        // grow_tree_gfr populated ws.leaf_segs with (node, beg, end) for
+        // each leaf; ws.flat_obs is already partitioned in matching order.
+        auto& ws = state.gfr_hist_ws;
         auto& lc = state.leaf_counts[t];
-        std::fill(lc.begin(), lc.end(), 0);
-        for (int i = 0; i < n; i++) lc[state.leaf_indices[t][i]]++;
-
-        // Rebuild flat_obs[t] and leaf_start[t]: counting sort, O(full_size + n)
         auto& fo = state.flat_obs[t];
         auto& ls = state.leaf_start[t];
+        auto& li = state.leaf_indices[t];
         int full_size = state.trees[t].full_size;
-        // Step 1: exclusive prefix sum of leaf_counts → leaf_start
+
+        // Step 1: copy partitioned obs list from workspace
+        std::copy(ws.flat_obs.begin(), ws.flat_obs.begin() + n, fo.begin());
+
+        // Step 2: derive lc and li from leaf_segs (O(n) scattered write,
+        // no tree traversal)
+        std::fill(lc.begin(), lc.end(), 0);
+        for (auto& seg : ws.leaf_segs) {
+            lc[seg.node] = seg.end - seg.beg;
+            for (int idx = seg.beg; idx < seg.end; idx++)
+                li[fo[idx]] = seg.node;
+        }
+
+        // Step 3: exclusive prefix sum of lc → ls
         int running = 0;
         for (int k = 1; k <= full_size; k++) { ls[k] = running; running += lc[k]; }
-        // Step 2: scatter obs into flat_obs using leaf_start as write cursors
-        for (int i = 0; i < n; i++) fo[ls[state.leaf_indices[t][i]]++] = i;
-        // Restore leaf_start (each cursor advanced by lc[k])
-        for (int k = 1; k <= full_size; k++) ls[k] -= lc[k];
 
         // zeros as pred_off: residual already fully restored above
         sample_leaves(state.trees[t], state.residual.data(), state.ws.zeros.data(),
