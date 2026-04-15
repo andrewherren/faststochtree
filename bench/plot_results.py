@@ -124,12 +124,12 @@ def load_data(csv_path):
 # ---------------------------------------------------------------------------
 
 def plot_track(ax, labels, times, base_color, title, plt, ticker):
-    RED_LINE = "#c0392b"
+    BEST     = "#4C72B0"
     GREY     = "#cccccc"
 
     valid = [t for t in times if t is not None]
     best_t = min(valid) if valid else None
-    colors = [RED_LINE if t == best_t else (GREY if t is None else base_color) for t in times]
+    colors = [BEST if t == best_t else (GREY if t is None else base_color) for t in times]
 
     xs = list(range(len(labels)))
     bars = ax.bar(xs, [t if t is not None else 0 for t in times],
@@ -167,14 +167,14 @@ def plot_track(ax, labels, times, base_color, title, plt, ticker):
         ax.text(0.98, 0.97,
                 f"Overall: {baseline / best_t:.0f}× faster",
                 transform=ax.transAxes, ha="right", va="top",
-                fontsize=10.5, fontweight="bold", color=RED_LINE,
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="#fff3f3",
-                          edgecolor=RED_LINE, linewidth=1))
+                fontsize=10.5, fontweight="bold", color=BEST,
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="#eef3fb",
+                          edgecolor=BEST, linewidth=1))
 
 
 def plot_rmse_track(ax, labels, rmses, base_color, title, sigma_true, plt, ticker):
     GREY     = "#cccccc"
-    GREEN    = "#27ae60"   # highlight: lowest RMSE
+    GREEN    = "#4C72B0"   # highlight: lowest RMSE
 
     valid = [r for r in rmses if r is not None]
     best_r = min(valid) if valid else None
@@ -257,7 +257,7 @@ def make_figures(best_times, best_rmses, scenario, out_bart, out_gfr,
     # ---- GFR speedup figure ----
     fig_gfr, ax_gfr = plt.subplots(figsize=(10, 5))
     fig_gfr.patch.set_facecolor("white")
-    plot_track(ax_gfr, gfr_labels, times_for(GFR_VERSIONS), "#DD8452",
+    plot_track(ax_gfr, gfr_labels, times_for(GFR_VERSIONS), "#4C72B0",
                f"GFR / XBART  (n={n:,}, p={p})  ·  200 trees · 15 burn-in · 25 samples · 4 threads",
                plt, ticker)
     fig_gfr.tight_layout()
@@ -279,7 +279,7 @@ def make_figures(best_times, best_rmses, scenario, out_bart, out_gfr,
     # ---- GFR RMSE figure ----
     fig_rmse_gfr, ax_rmse_gfr = plt.subplots(figsize=(10, 5))
     fig_rmse_gfr.patch.set_facecolor("white")
-    plot_rmse_track(ax_rmse_gfr, gfr_labels, rmses_for(GFR_VERSIONS), "#DD8452",
+    plot_rmse_track(ax_rmse_gfr, gfr_labels, rmses_for(GFR_VERSIONS), "#4C72B0",
                     f"GFR / XBART — test RMSE  (n={n:,}, p={p})  ·  200 trees · 15 burn-in · 25 samples",
                     sigma_true, plt, ticker)
     fig_rmse_gfr.tight_layout()
