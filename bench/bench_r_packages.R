@@ -1,6 +1,6 @@
 #!/usr/bin/env Rscript
-# bench/bench_r_packages.R — compare dbarts, BART::wbart, and flexBART on the same DGP
-#                            as bench/main.cpp (MCMC track only)
+# bench/bench_r_packages.R — compare dbarts, BART::wbart, flexBART, and stochtree
+#                            on the same DGP as bench/main.cpp (MCMC track only)
 #
 # DGP: y = sin(2π·x₁) + N(0, sigma_true²),  X ~ U[0,1]^(n×p)
 #
@@ -37,7 +37,7 @@ sigma_true <- as.numeric(get_arg(args, "sigma",    "1.0"))
 n_iters    <- as.integer(get_arg(args, "iters",    "10"))
 csv_path   <- get_arg(args, "csv", "bench/results/bench_results_r.csv")
 
-cat(sprintf("R package BART benchmark (MCMC only): dbarts, BART::wbart, flexBART\n"))
+cat(sprintf("R package BART benchmark (MCMC only): dbarts, BART::wbart, flexBART, stochtree\n"))
 cat(sprintf("  n_train=%d  n_test=%d  p=%d  trees=%d  iters=%d\n",
             n_train, n_test, p, num_trees, n_iters))
 cat(sprintf("  burnin=%d  samples=%d  sigma_true=%.2f\n\n",
@@ -46,6 +46,7 @@ cat(sprintf("  burnin=%d  samples=%d  sigma_true=%.2f\n\n",
 library(dbarts)
 library(BART)
 library(flexBART)
+library(stochtree)
 
 # ── CSV setup ─────────────────────────────────────────────────────────────────
 dir.create(dirname(csv_path), recursive = TRUE, showWarnings = FALSE)
@@ -67,6 +68,7 @@ write_csv_row <- function(tag, iter, ms, rmse) {
 db_ms   <- numeric(n_iters);  db_rmse   <- numeric(n_iters)
 wb_ms   <- numeric(n_iters);  wb_rmse   <- numeric(n_iters)
 fb_ms   <- numeric(n_iters);  fb_rmse   <- numeric(n_iters)
+st_ms   <- numeric(n_iters);  st_rmse   <- numeric(n_iters)
 
 for (iter in seq_len(n_iters)) {
   data_seed  <- seed + (iter - 1L)
@@ -103,7 +105,6 @@ for (iter in seq_len(n_iters)) {
     sigdf     = 3.0,
     sigest    = sigma_true,
     nchain    = 1L,
-    nthread   = 1L,
     seed      = model_seed,
     verbose   = FALSE,
     keeptrees = TRUE
@@ -181,6 +182,29 @@ for (iter in seq_len(n_iters)) {
   fb_ms[iter] <- ms;  fb_rmse[iter] <- rmse_fb
   write_csv_row("flexBART", iter, ms, rmse_fb)
 
+  # ── stochtree::bart ───────────────────────────────────────────────────────────
+  cat(sprintf("  stochtree     ..."))
+  flush(stdout())
+
+  t0 <- proc.time()[["elapsed"]]
+  st_result <- stochtree::bart(
+    X_train            = X_train,
+    y_train            = y_train,
+    X_test             = X_test,
+    num_gfr            = 0L,
+    num_burnin         = n_burnin,
+    num_mcmc           = n_samples,
+    general_params     = list(random_seed = model_seed),
+    mean_forest_params = list(num_trees   = num_trees)
+  )
+  ms <- as.integer(round((proc.time()[["elapsed"]] - t0) * 1000))
+
+  yhat_st <- rowMeans(st_result$y_hat_test)
+  rmse_st <- sqrt(mean((y_test - yhat_st)^2))
+  cat(sprintf(" %6d ms  RMSE=%.4f\n", ms, rmse_st))
+  st_ms[iter] <- ms;  st_rmse[iter] <- rmse_st
+  write_csv_row("stochtree-r-bart", iter, ms, rmse_st)
+
   cat("\n")
 }
 
@@ -196,4 +220,6 @@ cat(sprintf("%-20s  %9d  %8.4f\n", "BART::wbart",
             as.integer(round(mean(wb_ms))), mean(wb_rmse)))
 cat(sprintf("%-20s  %9d  %8.4f\n", "flexBART",
             as.integer(round(mean(fb_ms))), mean(fb_rmse)))
+cat(sprintf("%-20s  %9d  %8.4f\n", "stochtree",
+            as.integer(round(mean(st_ms))), mean(st_rmse)))
 cat(sprintf("\nCSV: %s\n", csv_path))
