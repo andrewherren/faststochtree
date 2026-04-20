@@ -1,16 +1,10 @@
 #include "faststochtree/gfr.hpp"
-#include "faststochtree/mcmc.hpp"
 #include <algorithm>
 #include <cmath>
 #include <climits>
 #include <limits>
 #include <numeric>
 #include <vector>
-
-// MSVC doesn't support __builtin_prefetch; make it a no-op there.
-#ifndef __GNUC__
-#  define __builtin_prefetch(addr, ...) ((void)(addr))
-#endif
 
 #ifdef __ARM_NEON
 #include <arm_neon.h>
@@ -136,6 +130,7 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
                 if (n_k >= 128) {
                     const uint8_t* col = Xq.data.data() + j * Xq.n;
                     for (; hk + 3 < end; hk += 4) {
+                        #ifdef __GNUC__
                         if (hk + PF + 3 < end) {
                             __builtin_prefetch(col + ws.flat_obs[hk + PF],     0, 1);
                             __builtin_prefetch(col + ws.flat_obs[hk + PF + 1], 0, 1);
@@ -146,6 +141,7 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
                             __builtin_prefetch(resid + ws.flat_obs[hk + PF + 2], 0, 1);
                             __builtin_prefetch(resid + ws.flat_obs[hk + PF + 3], 0, 1);
                         }
+                        #endif
                         int o0 = ws.flat_obs[hk],   o1 = ws.flat_obs[hk+1];
                         int o2 = ws.flat_obs[hk+2], o3 = ws.flat_obs[hk+3];
                         uint8_t b0 = col[o0], b1 = col[o1];
