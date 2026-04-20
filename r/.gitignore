@@ -1,0 +1,10 @@
+# Core sources copied by configure — not committed, regenerated at install time
+src/quantize.cpp
+src/mcmc.cpp
+src/gfr.cpp
+src/sampler.cpp
+
+# Build artifacts
+src/*.o
+src/*.so
+src/*.dll

@@ -1,0 +1,6 @@
+#!/bin/sh
+# Copy core C++ sources into src/ so R CMD INSTALL can find them.
+# Runs on macOS and Linux; configure.win handles Windows.
+for f in quantize mcmc gfr sampler; do
+    cp "../src/${f}.cpp" "src/${f}.cpp"
+done
