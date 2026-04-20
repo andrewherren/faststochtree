@@ -1,6 +1,9 @@
 #include "faststochtree/sampler.hpp"
 #include <gtest/gtest.h>
 #include <cmath>
+#ifndef M_PI
+#  define M_PI 3.14159265358979323846
+#endif
 #include <vector>
 
 // Simulate y = sin(2*pi*x) + N(0, sigma^2), X ~ U(0,1)
