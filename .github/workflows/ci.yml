@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14        # ARM (M1) — exercises NEON path
+            name: macOS ARM
+            bin_dir: build
+            build_args: ""
+            ctest_args: ""
+          - os: ubuntu-latest   # x86-64 — exercises scalar fallback
+            name: Linux x86-64
+            bin_dir: build
+            build_args: ""
+            ctest_args: ""
+          - os: windows-latest  # MSVC multi-config; binaries land in build/Release/
+            name: Windows x86-64
+            bin_dir: build/Release
+            build_args: --config Release
+            ctest_args: -C Release
+
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache CMake fetch dependencies
+        uses: actions/cache@v4
+        with:
+          path: .cmake-fetch-cache
+          key: cmake-fetch-${{ matrix.os }}-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DFETCHCONTENT_BASE_DIR=${{ github.workspace }}/.cmake-fetch-cache
+        shell: bash
+
+      - name: Build
+        run: cmake --build build ${{ matrix.build_args }} -j4
+
+      - name: Unit tests
+        run: ctest --test-dir build ${{ matrix.ctest_args }} --output-on-failure
+
+      - name: Smoke test — BART MCMC
+        run: |
+          ${{ matrix.bin_dir }}/faststochtree_bench \
+            --n_train 500 --p 10 --trees 50 \
+            --burnin 20 --samples 20 --iters 3
+        shell: bash
+
+      - name: Smoke test — GFR/XBART
+        run: |
+          ${{ matrix.bin_dir }}/faststochtree_bench \
+            --mode xbart --n_train 500 --p 10 --trees 50 \
+            --burnin 2 --samples 2 --iters 2
+        shell: bash
