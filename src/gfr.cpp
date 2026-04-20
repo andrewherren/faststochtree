@@ -7,6 +7,11 @@
 #include <numeric>
 #include <vector>
 
+// MSVC doesn't support __builtin_prefetch; make it a no-op there.
+#ifndef __GNUC__
+#  define __builtin_prefetch(addr, ...) ((void)(addr))
+#endif
+
 #ifdef __ARM_NEON
 #include <arm_neon.h>
 // compress8: lookup table for branchless 8-lane compress (NEON partition).
