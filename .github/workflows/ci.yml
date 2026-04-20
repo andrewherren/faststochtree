@@ -44,7 +44,7 @@ jobs:
         run: |
           cmake -S . -B build \
             -DCMAKE_BUILD_TYPE=Release \
-            -DFETCHCONTENT_BASE_DIR=${{ github.workspace }}/.cmake-fetch-cache
+            -DFETCHCONTENT_BASE_DIR="${GITHUB_WORKSPACE}/.cmake-fetch-cache"
         shell: bash
 
       - name: Build

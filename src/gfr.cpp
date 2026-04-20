@@ -2,6 +2,7 @@
 #include "faststochtree/mcmc.hpp"
 #include <algorithm>
 #include <cmath>
+#include <climits>
 #include <limits>
 #include <numeric>
 #include <vector>
