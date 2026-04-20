@@ -1,0 +1,15 @@
+[build-system]
+requires = ["scikit-build-core>=0.9", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "faststochtree"
+version = "0.1.0"
+description = "Fast BART/XBART on Apple Silicon"
+requires-python = ">=3.9"
+
+[tool.scikit-build]
+cmake.source-dir = ".."
+cmake.build-type = "Release"
+cmake.args = ["-DBUILD_PYTHON_BINDINGS=ON"]
+wheel.packages = ["src/faststochtree"]
