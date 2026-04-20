@@ -25,6 +25,8 @@ cmake --build build-release -j$(sysctl -n hw.logicalcpu)
 
 ## Benchmark binary
 
+One of the standard build artifacts for `faststochtree` (crucial to its development) is a benchmarking binary that fits a BART / XBART model to generated dataset. After building, the program can be run as follows.
+
 ```bash
 ./build-release/faststochtree_bench [options]
 ```
@@ -44,11 +46,11 @@ cmake --build build-release -j$(sysctl -n hw.logicalcpu)
 | `--iters` | `10` | Independent repetitions (different seeds) |
 | `--seed` | `12345` | Base random seed |
 | `--sigma` | `1.0` | True noise standard deviation |
-| `--csv` | `bench/results/bench_results_mc.csv` | Append per-iteration rows to this file |
+| `--csv` | `bench/results/bench_results.csv` | Append per-iteration rows to this file |
 
 Each of the `--iters` repetitions uses independent data and model seeds derived from `--seed`, so timing and RMSE can be averaged over independent data realisations.
 
-Quick smoke-test:
+To run a quick "smoke-test":
 
 ```bash
 ./build-release/faststochtree_bench --n_train 2000 --p 10 --trees 50 --burnin 50 --samples 100 --iters 3
@@ -56,73 +58,44 @@ Quick smoke-test:
 
 ---
 
-## Benchmark suites
+## Benchmark suite — `bench/run_rmse_experiment.sh`
 
-### Single-run sweep — `bench/run_suite.sh`
-
-Benchmarks one or more git tags across a grid of `(n, p)` values, writing one row per run to `bench/results/bench_results.csv`. Useful for comparing algorithmic versions where a single timing is sufficient.
+This script benchmarks one or more of the git tags that define the scaffolded rollout of performance improvements across a grid of `(n, p)` values. The `run_rmse_experiment` script runs the algorithm `K` times each against `M` independently-seeded synthetic datasets, writing one row per (dataset, chain) to `bench/results/bench_results.csv`. This separates dataset variance from sampler variance for a fair comparison across versions.
 
 ```bash
-# Current checkout, default grid (n=10k,50k × p=10,50)
-./bench/run_suite.sh
+# Current checkout, default scenario (n=50k, p=50, M=10 datasets, K=5 chains)
+./bench/run_rmse_experiment.sh
 
 # Specific tags via git worktrees (your working tree is untouched)
-./bench/run_suite.sh --tags v12-leaf-counts,v13-flat-obs
-
-# Fast tags only, restricted scenario
-./bench/run_suite.sh --tags v13-flat-obs --n 50000 --p 50
+./bench/run_rmse_experiment.sh --tags v12-leaf-counts,v13-flat-obs
 
 # XBART mode
-./bench/run_suite.sh --mode xbart --tags gfr-v9-histogram,gfr-v10-flat-node-range
+./bench/run_rmse_experiment.sh --mode xbart --tags gfr-v9-histogram,gfr-v10-flat-node-range
 
 # Guard against slow early versions
-./bench/run_suite.sh --tags v1-naive-cpp --n 5000 --timeout 120
+./bench/run_rmse_experiment.sh --tags v1-naive-cpp --timeout 120
 
-# Tiny grid for testing the script itself
-./bench/run_suite.sh --quick
+# Tiny run for smoke-testing
+./bench/run_rmse_experiment.sh --quick
 ```
 
 | Option | Default | Description |
 |---|---|---|
 | `--tags TAG[,...]` | current checkout | Git tags to benchmark via worktrees |
-| `--n N[,N,...]` | `10000,50000` | Training-set sizes |
-| `--p P[,P,...]` | `10,50` | Feature counts |
+| `--M N` | `10` | Number of independent datasets |
+| `--K N` | `5` | Chains per dataset |
+| `--n N[,N,...]` | `50000` | Training-set sizes |
+| `--p P[,P,...]` | `50` | Feature counts |
 | `--mode` | `bart` | `bart` or `xbart` |
 | `--trees` | `200` | Trees in ensemble |
-| `--burnin` | `200`/`15` | Burn-in iterations |
-| `--samples` | `1000`/`25` | Posterior samples |
+| `--burnin` | `200`/`15` | Burn-in iterations (bart / xbart) |
+| `--samples` | `1000`/`25` | Posterior samples (bart / xbart) |
 | `--timeout SECS` | `0` (none) | Kill a run after N seconds |
 | `--results FILE` | `bench/results/bench_results.csv` | Output CSV |
 | `--no-skip` | — | Re-run even if result already recorded |
 | `--quick` | — | Tiny grid for smoke-testing |
 
-### Multi-iteration sweep — `bench/run_suite_mc.sh`
-
-Like `run_suite.sh`, but runs each configuration `--iters` times with independent random seeds, writing one row per iteration to `bench_results_mc.csv`. Use this when you want to average timing and RMSE over multiple data realisations for a more reliable comparison.
-
-```bash
-# Current checkout, 10 iterations at default scenario (n=50k, p=50)
-./bench/run_suite_mc.sh
-
-# Specific tags
-./bench/run_suite_mc.sh --tags v12-leaf-counts,v13-flat-obs --iters 20
-
-# Slower tags — restrict n to avoid very long runtimes
-./bench/run_suite_mc.sh --tags v1-naive-cpp --n 10000 --timeout 300
-
-# Tiny run for testing
-./bench/run_suite_mc.sh --quick
-```
-
-Same options as `run_suite.sh`, plus:
-
-| Option | Default | Description |
-|---|---|---|
-| `--iters N` | `10` | Independent repetitions per configuration |
-| `--n N[,N,...]` | `50000` | Training-set sizes (narrower default than single-run) |
-| `--results FILE` | `bench/results/bench_results_mc.csv` | Output CSV (C++ only) |
-
-> **Note on slow tags:** v1–v4 (BART) and gfr-v1 (GFR) can each take several minutes per run at n=50k. Multiply by `--iters` before committing to a full sweep.
+> **Note on slow tags:** v1 through v6 (BART) and gfr-v3 through gfr-v8 (GFR) can each take several minutes per run at n=50k. Use `--timeout` or restrict `--n` when benchmarking early versions.
 
 ---
 
@@ -130,52 +103,31 @@ Same options as `run_suite.sh`, plus:
 
 | File | Written by | Content |
 |---|---|---|
-| `bench/results/bench_results.csv` | `run_suite.sh` | One row per (tag, n, p) run |
-| `bench/results/bench_results_mc.csv` | `run_suite_mc.sh`, C++ binary | One row per iteration (C++ only) |
-| `bench/results/bench_results_r.csv` | `bench_stochtree_r.R`, `bench_r_packages.R` | One row per iteration (R packages) |
-
-## Viewing results
-
-```bash
-# Single-run CSV (default)
-./bench/show_results.sh
-
-# Multi-iteration CSV (aggregated — shows avg_ms and avg_rmse per version)
-./bench/show_results.sh --mc
-
-# Explicit file
-./bench/show_results.sh bench/results/bench_results_mc.csv
-
-# Filter options (work for both formats)
-./bench/show_results.sh --mode xbart
-./bench/show_results.sh --n 50000
-./bench/show_results.sh --tag v13
-```
-
-The script auto-detects the CSV format from the header. Multi-iteration results are averaged across iterations before display.
+| `bench/results/bench_results.csv` | `run_rmse_experiment.sh`, C++ binary | One row per (tag, dataset, chain) |
+| `bench/results/bench_results_r.csv` | `bench_r_packages.R` | One row per iteration (R MCMC packages) |
+| `bench/results/bench_results_r_gfr.csv` | `bench_r_packages_gfr.R` | One row per iteration (R GFR packages) |
 
 ---
 
 ## Plotting results
 
+The plots in the blog post are created via a python script that reads from `bench_results.csv`
+
 ```bash
-# From the single-run CSV (uses min time per version)
+# Default (uses bench/results/bench_results.csv)
 python bench/plot_results.py
 
-# From the multi-iteration CSV (uses mean time and mean RMSE per version)
-python bench/plot_results.py --mc
-
 # Explicit CSV path
-python bench/plot_results.py --csv bench/results/bench_results_mc.csv
+python bench/plot_results.py --csv bench/results/bench_results.csv
 
-# Display interactively instead of saving
+# Print aggregated results to terminal as well
 python bench/plot_results.py --show
 
-# Different scenario
+# Restrict to a specific scenario
 python bench/plot_results.py --n 200000 --p 10
 ```
 
-Produces four PNGs in `bench/results/`:
+This produces four PNGs in `bench/results/`:
 
 | File | Content |
 |---|---|
@@ -184,33 +136,30 @@ Produces four PNGs in `bench/results/`:
 | `rmse_bart.png` | BART MCMC test RMSE by version |
 | `rmse_gfr.png` | GFR/XBART test RMSE by version |
 
-The format is auto-detected from the CSV header; `--mc` is a shorthand for pointing at `bench_results_mc.csv`.
-
 ---
 
 ## Cross-implementation comparisons
 
 All comparison scripts use the same DGP (`y = sin(2π·x₁) + N(0, σ²)`) and run `--iters` independent repetitions, reporting per-iteration timing and RMSE then an average. RNG implementations differ across languages, so individual data realisations will not match, but the DGP structure is identical.
 
-Results from the R scripts are written to **`bench/results/bench_results_r.csv`** (shared by both scripts, separate from the C++ CSVs). Pass `--csv FILE` to override.
+Results from the R scripts are written to separate CSVs (separate from the C++ CSV). Pass `--csv FILE` to override.
 
-### stochtree R — `bench/bench_stochtree_r.R`
+### MCMC comparison — `bench/bench_r_packages.R`
 
-Times `stochtree::bart()` in MCMC or GFR mode.
-
-```bash
-Rscript bench/bench_stochtree_r.R
-Rscript bench/bench_stochtree_r.R --mode xbart
-Rscript bench/bench_stochtree_r.R --n_train 10000 --p 10 --iters 5
-```
-
-### dbarts, BART, and flexBART — `bench/bench_r_packages.R`
-
-Times `dbarts`, `BART`, and `flexBART` implementations of the BART model back-to-back on the same data each iteration (MCMC only; none of these packages offer GFR).
+Times `dbarts`, `BART::wbart`, `flexBART`, and `stochtree` back-to-back on the same data each iteration. Results written to `bench/results/bench_results_r.csv`.
 
 ```bash
 Rscript bench/bench_r_packages.R
 Rscript bench/bench_r_packages.R --n_train 10000 --p 10 --iters 5
+```
+
+### GFR comparison — `bench/bench_r_packages_gfr.R`
+
+Times `stochtree` (GFR mode) and `XBART` back-to-back on the same data each iteration. Results written to `bench/results/bench_results_r_gfr.csv`.
+
+```bash
+Rscript bench/bench_r_packages_gfr.R
+Rscript bench/bench_r_packages_gfr.R --n_train 10000 --p 10 --iters 5
 ```
 
 ### bartz (JAX/GPU) — `bench/bench_bartz.ipynb`
@@ -221,12 +170,16 @@ Jupyter notebook intended for Colab GPU. Set `n_iters` in the configuration cell
 
 ---
 
-## Tests
+## Unit tests
+
+`faststochtree` also includes a test suite which can be run either via `ctest`
 
 ```bash
-# Via ctest
 ctest --test-dir build-release --output-on-failure
+```
 
-# Directly (verbose)
+or by executing the test program directly
+
+```bash
 ./build-release/test_bart
 ```
