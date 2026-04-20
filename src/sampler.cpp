@@ -105,4 +105,65 @@ BARTResult run_xbart(const float* X,      const float* y, int n, int p,
     return result;
 }
 
+
+// ── BARTModel::predict ────────────────────────────────────────────────────────
+
+std::vector<float> BARTModel::predict(const float* X_new, int n_new) const {
+    QuantizedX qx = quantize_with_cuts(X_new, n_new, train_cuts);
+    std::vector<float> out(n_samples * n_new, 0.f);
+    for (int s = 0; s < n_samples; s++) {
+        const Forest& forest = forests[s];
+        float* row = out.data() + s * n_new;
+        for (const Tree& tree : forest)
+            for (int i = 0; i < n_new; i++)
+                row[i] += tree.leaf_value[tree.traverse(qx.data.data(), i, n_new)];
+    }
+    return out;
+}
+
+// ── fit_bart / fit_xbart ──────────────────────────────────────────────────────
+
+static BARTModel make_model(BARTResult& res, QuantizedX train_cuts) {
+    BARTModel m;
+    m.n_samples      = static_cast<int>(res.forests.size());
+    m.n_test         = res.test_samples.empty() ? 0
+                       : static_cast<int>(res.test_samples[0].size());
+    m.forests        = std::move(res.forests);
+    m.train_cuts     = std::move(train_cuts);
+    m.sigma2_samples = std::move(res.sigma2_samples);
+
+    // Flatten test_samples: [sample][obs] → row-major [n_samples × n_test]
+    m.test_samples.resize(static_cast<size_t>(m.n_samples) * m.n_test);
+    for (int s = 0; s < m.n_samples; s++)
+        std::copy(res.test_samples[s].begin(), res.test_samples[s].end(),
+                  m.test_samples.data() + s * m.n_test);
+    return m;
+}
+
+BARTModel fit_bart(const float* X,      const float* y, int n, int p,
+                   const float* X_test, int n_test,
+                   const BARTConfig& cfg, int n_burnin, int n_samples, int seed) {
+    RNG rng(static_cast<unsigned>(seed));
+    // Quantize training data first so we can save the cuts.
+    QuantizedX train_qx = quantize(X, n, p);
+    // run_bart re-quantizes internally, but we need the cuts separately.
+    // Re-use the same quantized data by calling the internal path directly.
+    BARTResult res = run_bart(X, y, n, p, X_test, n_test, cfg, n_burnin, n_samples, rng);
+    // Extract cuts from a fresh quantize call (same data → same cuts).
+    QuantizedX cuts_only = std::move(train_qx);
+    cuts_only.data.clear();  // drop raw data, keep cuts
+    return make_model(res, std::move(cuts_only));
+}
+
+BARTModel fit_xbart(const float* X,      const float* y, int n, int p,
+                    const float* X_test, int n_test,
+                    const BARTConfig& cfg, int n_burnin, int n_samples, int seed) {
+    RNG rng(static_cast<unsigned>(seed));
+    QuantizedX train_qx = quantize(X, n, p);
+    BARTResult res = run_xbart(X, y, n, p, X_test, n_test, cfg, n_burnin, n_samples, rng);
+    QuantizedX cuts_only = std::move(train_qx);
+    cuts_only.data.clear();
+    return make_model(res, std::move(cuts_only));
+}
+
 } // namespace bart

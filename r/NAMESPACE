@@ -1,0 +1,10 @@
+useDynLib(faststochtree, .registration = TRUE)
+
+importFrom(stats, predict)
+
+export(bart_config)
+export(fit_bart)
+export(fit_xbart)
+export(test_samples)
+export(sigma2_samples)
+S3method(predict, BARTModel)
