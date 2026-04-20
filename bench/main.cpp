@@ -31,7 +31,7 @@ int main(int argc, char** argv) {
     int         n_iters  = atoi(get_arg(argc, argv, "iters",    "10"));
     int         explicit_model_seed = atoi(get_arg(argc, argv, "model_seed", "-1"));
     float       sigma_true = atof(get_arg(argc, argv, "sigma",  "1.0"));
-    const char* csv_path = get_arg(argc, argv, "csv", "bench/results/bench_results_mc.csv");
+    const char* csv_path = get_arg(argc, argv, "csv", "bench/results/bench_results.csv");
 
     bool xbart = (strcmp(mode, "xbart") == 0);
     int  n_burnin  = atoi(get_arg(argc, argv, "burnin",  xbart ? "15"   : "200"));
