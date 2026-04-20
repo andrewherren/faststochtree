@@ -40,7 +40,7 @@ BASE_MODEL_SEED=4321
 TIMEOUT_S=0
 SKIP_EXISTING=true
 TAGS=()
-RESULTS_CSV="$SCRIPT_DIR/results/bench_results_rmse.csv"
+RESULTS_CSV="$SCRIPT_DIR/results/bench_results.csv"
 
 # ── Usage ─────────────────────────────────────────────────────────────────────
 usage() {
@@ -61,7 +61,7 @@ OPTIONS:
   --samples N            Posterior samples    (default: 1000 bart / 25 xbart)
   --threads N            Thread count (xbart)                (default: 1)
   --timeout SECS         Kill a run after N seconds; 0 = none (default: 0)
-  --results FILE         CSV path (default: bench/results/bench_results_rmse.csv)
+  --results FILE         CSV path (default: bench/results/bench_results.csv)
   --no-skip              Re-run even if row already in CSV
   --quick                n=2000, p=10, trees=50, burnin=50, samples=100, M=2, K=2
   -h, --help             Show this help
