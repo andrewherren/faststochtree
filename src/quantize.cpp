@@ -1,4 +1,5 @@
 #include "faststochtree/quantize.hpp"
+#include <algorithm>
 
 namespace bart {
 
