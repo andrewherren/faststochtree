@@ -29,6 +29,7 @@ int main(int argc, char** argv) {
     int   seed           = atoi(get_arg(argc, argv, "seed",     "12345"));
     int   num_threads    = atoi(get_arg(argc, argv, "threads",  "1"));
     int         n_iters  = atoi(get_arg(argc, argv, "iters",    "10"));
+    int         explicit_model_seed = atoi(get_arg(argc, argv, "model_seed", "-1"));
     float       sigma_true = atof(get_arg(argc, argv, "sigma",  "1.0"));
     const char* csv_path = get_arg(argc, argv, "csv", "bench/results/bench_results_mc.csv");
 
@@ -82,7 +83,8 @@ int main(int argc, char** argv) {
     for (int iter = 0; iter < n_iters; iter++) {
         // Each iteration gets its own independent seeds
         int data_seed  = seed + iter;
-        int model_seed = seed + n_iters + iter;
+        int model_seed = (explicit_model_seed >= 0) ? explicit_model_seed
+                                                    : seed + n_iters + iter;
 
         // Simulate data: y = sin(2*pi*x1) + N(0, sigma_true^2)
         bart::RNG data_rng(data_seed);
