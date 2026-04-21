@@ -17,10 +17,10 @@ y_test = f_test + rng.standard_normal(n_test)
 
 # Fit BART / XBART
 start = time.time()
-model = fst.fit_bart(X, y, X_test)
-# config = fst.BARTConfig()
-# config.num_threads = 8
-# model = fst.fit_xbart(X, y, X_test, config=config)
+# model = fst.fit_bart(X, y, X_test)
+config = fst.BARTConfig()
+config.num_threads = 8
+model = fst.fit_xbart(X, y, X_test, config=config)
 end = time.time()
 print(end - start)
 
