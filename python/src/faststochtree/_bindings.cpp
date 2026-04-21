@@ -44,7 +44,7 @@ PYBIND11_MODULE(_faststochtree, m) {
         // test_samples as a 2-D [n_samples × n_test] numpy array
         .def_property_readonly("test_samples", [](const bart::BARTModel& self) {
             if (self.n_test == 0)
-                return py::array_t<float>({(py::ssize_t)0, (py::ssize_t)0});
+                return py::array_t<float>(std::vector<py::ssize_t>{0, 0});
             return py::array_t<float>(
                 {(py::ssize_t)self.n_samples, (py::ssize_t)self.n_test},
                 self.test_samples.data());
