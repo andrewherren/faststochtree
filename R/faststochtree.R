@@ -3,7 +3,7 @@
 #' @param num_trees        Number of trees (default 200)
 #' @param alpha            Tree prior base (default 0.95)
 #' @param beta             Tree prior power (default 2.0)
-#' @param leaf_prior_var   Leaf value prior variance tau (default 1.0)
+#' @param leaf_prior_var   Leaf value prior variance tau; auto-set from num_trees when fitting
 #' @param sigma2_shape     Noise variance prior shape nu (default 3.0)
 #' @param sigma2_scale     Noise variance prior scale lambda (default 1.0)
 #' @param min_samples_leaf Minimum observations per leaf (default 5)
@@ -31,6 +31,15 @@ bart_config <- function(num_trees        = 200L,
        num_threads      = as.integer(num_threads))
 }
 
+.scale_y <- function(y) {
+  y_mean <- mean(y)
+  y_sd   <- sd(y)
+  if (y_sd == 0) y_sd <- 1.0
+  list(y_scaled = (y - y_mean) / y_sd,
+       y_mean   = y_mean,
+       y_sd     = y_sd)
+}
+
 #' Fit a BART model via MCMC
 #'
 #' @param X        Numeric matrix [n × p] of training covariates
@@ -47,10 +56,12 @@ fit_bart <- function(X, y, X_test,
                      n_samples = 1000L,
                      seed      = 42L,
                      config    = bart_config()) {
-  ptr <- fit_bart_cpp(as.matrix(X), as.double(y), as.matrix(X_test),
+  sc <- .scale_y(y)
+  config$leaf_prior_var <- 1.0 / config$num_trees
+  ptr <- fit_bart_cpp(as.matrix(X), sc$y_scaled, as.matrix(X_test),
                       as.integer(n_burnin), as.integer(n_samples),
                       as.integer(seed), config)
-  structure(list(ptr = ptr), class = "BARTModel")
+  structure(list(ptr = ptr, y_mean = sc$y_mean, y_sd = sc$y_sd), class = "BARTModel")
 }
 
 #' Fit an XBART model via grow-from-root (GFR)
@@ -71,10 +82,12 @@ fit_xbart <- function(X, y, X_test,
                       seed        = 42L,
                       num_threads = 1L,
                       config      = bart_config(num_threads = num_threads)) {
-  ptr <- fit_xbart_cpp(as.matrix(X), as.double(y), as.matrix(X_test),
+  sc <- .scale_y(y)
+  config$leaf_prior_var <- 1.0 / config$num_trees
+  ptr <- fit_xbart_cpp(as.matrix(X), sc$y_scaled, as.matrix(X_test),
                        as.integer(n_burnin), as.integer(n_samples),
                        as.integer(seed), config)
-  structure(list(ptr = ptr), class = "BARTModel")
+  structure(list(ptr = ptr, y_mean = sc$y_mean, y_sd = sc$y_sd), class = "BARTModel")
 }
 
 #' Posterior predictive samples for new observations
@@ -85,7 +98,7 @@ fit_xbart <- function(X, y, X_test,
 #' @return Numeric matrix [n_samples × n_new] of posterior predictive draws
 #' @export
 predict.BARTModel <- function(object, newdata, ...) {
-  predict_cpp(object$ptr, as.matrix(newdata))
+  predict_cpp(object$ptr, as.matrix(newdata)) * object$y_sd + object$y_mean
 }
 
 #' Posterior test predictions from the fit call
@@ -93,11 +106,15 @@ predict.BARTModel <- function(object, newdata, ...) {
 #' @param model A BARTModel object
 #' @return Numeric matrix [n_samples × n_test]
 #' @export
-test_samples <- function(model) test_samples_cpp(model$ptr)
+test_samples <- function(model) {
+  test_samples_cpp(model$ptr) * model$y_sd + model$y_mean
+}
 
 #' Posterior noise-variance samples
 #'
 #' @param model A BARTModel object
 #' @return Numeric vector [n_samples]
 #' @export
-sigma2_samples <- function(model) sigma2_samples_cpp(model$ptr)
+sigma2_samples <- function(model) {
+  sigma2_samples_cpp(model$ptr) * model$y_sd^2
+}
