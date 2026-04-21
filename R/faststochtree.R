@@ -58,17 +58,20 @@ fit_bart <- function(X, y, X_test,
 #' @param X        Numeric matrix [n × p] of training covariates
 #' @param y        Numeric vector [n] of training responses
 #' @param X_test   Numeric matrix [n_test × p] for in-sample test predictions
-#' @param n_burnin Number of GFR burn-in sweeps (default 15)
-#' @param n_samples Number of GFR samples to retain (default 25)
-#' @param seed     Integer random seed (default 42)
-#' @param config   Named list from bart_config() (default bart_config())
+#' @param n_burnin    Number of GFR burn-in sweeps (default 15)
+#' @param n_samples   Number of GFR samples to retain (default 25)
+#' @param seed        Integer random seed (default 42)
+#' @param num_threads Number of threads for GFR parallelism (default 1)
+#' @param config      Named list from bart_config(); num_threads overrides config$num_threads
 #' @return A BARTModel object
 #' @export
 fit_xbart <- function(X, y, X_test,
-                      n_burnin  = 15L,
-                      n_samples = 25L,
-                      seed      = 42L,
-                      config    = bart_config()) {
+                      n_burnin    = 15L,
+                      n_samples   = 25L,
+                      seed        = 42L,
+                      num_threads = 1L,
+                      config      = bart_config()) {
+  config$num_threads <- as.integer(num_threads)
   ptr <- fit_xbart_cpp(as.matrix(X), as.double(y), as.matrix(X_test),
                        as.integer(n_burnin), as.integer(n_samples),
                        as.integer(seed), config)
