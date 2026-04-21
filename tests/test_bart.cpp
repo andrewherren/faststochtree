@@ -27,6 +27,7 @@ TEST(BARTSmoke, RunsWithoutCrash) {
     bart::BARTConfig cfg;
     cfg.num_trees      = 20;
     cfg.leaf_prior_var = 0.25f / cfg.num_trees;
+    cfg.num_threads = 1;
 
     bart::RNG rng(123);
     auto result = bart::run_bart(X.data(), y.data(), n, p,
@@ -53,6 +54,7 @@ TEST(BARTCorrectness, ReasonableRMSE) {
     cfg.num_trees      = 50;
     cfg.leaf_prior_var = 0.25f / cfg.num_trees;
     cfg.sigma2_scale   = sigma_true * sigma_true;
+    cfg.num_threads    = 1;
 
     bart::RNG rng(42);
     auto result = bart::run_bart(X.data(), y.data(), n, p,

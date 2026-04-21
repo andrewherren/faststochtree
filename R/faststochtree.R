@@ -3,18 +3,18 @@
 #' @param num_trees        Number of trees (default 200)
 #' @param alpha            Tree prior base (default 0.95)
 #' @param beta             Tree prior power (default 2.0)
-#' @param leaf_prior_var   Leaf value prior variance tau; auto-set from num_trees when fitting
+#' @param leaf_prior_var   Leaf value prior variance tau; calibrated based on num_trees when set to -1.0
 #' @param sigma2_shape     Noise variance prior shape nu (default 3.0)
 #' @param sigma2_scale     Noise variance prior scale lambda (default 1.0)
 #' @param min_samples_leaf Minimum observations per leaf (default 5)
 #' @param p_eval           Features evaluated per node; 0 = all (default 0)
-#' @param num_threads      Thread count for GFR parallelism (default 1)
+#' @param num_threads      Thread count for GFR parallelism (default 1, ignored for BART, only used by XBART)
 #' @return A named list suitable for passing to fit_bart() or fit_xbart()
 #' @export
 bart_config <- function(num_trees        = 200L,
                         alpha            = 0.95,
                         beta             = 2.0,
-                        leaf_prior_var   = 1.0,
+                        leaf_prior_var   = -1.0,
                         sigma2_shape     = 3.0,
                         sigma2_scale     = 1.0,
                         min_samples_leaf = 5L,
@@ -57,7 +57,9 @@ fit_bart <- function(X, y, X_test,
                      seed      = 42L,
                      config    = bart_config()) {
   sc <- .scale_y(y)
-  config$leaf_prior_var <- 1.0 / config$num_trees
+  if (config$leaf_prior_var < 0) {
+    config$leaf_prior_var <- 1.0 / config$num_trees
+  }
   ptr <- fit_bart_cpp(as.matrix(X), sc$y_scaled, as.matrix(X_test),
                       as.integer(n_burnin), as.integer(n_samples),
                       as.integer(seed), config)
@@ -72,7 +74,6 @@ fit_bart <- function(X, y, X_test,
 #' @param n_burnin    Number of GFR burn-in sweeps (default 15)
 #' @param n_samples   Number of GFR samples to retain (default 25)
 #' @param seed        Integer random seed (default 42)
-#' @param num_threads Number of threads for GFR parallelism (default 1); ignored if config is supplied
 #' @param config      Named list from bart_config() (optional; overrides num_threads)
 #' @return A BARTModel object
 #' @export
@@ -80,10 +81,11 @@ fit_xbart <- function(X, y, X_test,
                       n_burnin    = 15L,
                       n_samples   = 25L,
                       seed        = 42L,
-                      num_threads = 1L,
-                      config      = bart_config(num_threads = num_threads)) {
+                      config      = bart_config()) {
   sc <- .scale_y(y)
-  config$leaf_prior_var <- 1.0 / config$num_trees
+  if (config$leaf_prior_var < 0) {
+    config$leaf_prior_var <- 1.0 / config$num_trees
+  }
   ptr <- fit_xbart_cpp(as.matrix(X), sc$y_scaled, as.matrix(X_test),
                        as.integer(n_burnin), as.integer(n_samples),
                        as.integer(seed), config)
