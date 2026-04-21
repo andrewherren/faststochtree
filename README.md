@@ -12,7 +12,48 @@ M-series machines are (a) high-performance consumer devices, and (b) very common
 
 ---
 
-## Getting Started
+## R Package
+
+Requires a C++17 compiler. Install directly from GitHub:
+
+```r
+# install.packages("remotes")  # if not already installed
+remotes::install_github("andrewherren/faststochtree")
+```
+
+Then in R:
+
+```r
+library(faststochtree)
+model <- fit_xbart(X, y, X_test)
+yhat  <- colMeans(test_samples(model))
+```
+
+See `scripts/R/regression_demo.R` for a full example.
+
+---
+
+## Python Package
+
+Requires Python ≥ 3.9, CMake ≥ 3.20, and a C++17 compiler. Install directly from GitHub:
+
+```bash
+pip install "git+https://github.com/andrewherren/faststochtree.git#subdirectory=python"
+```
+
+Then in Python:
+
+```python
+import faststochtree as fst
+model = fst.fit_xbart(X, y, X_test)
+yhat  = model.test_samples.mean(axis=0)
+```
+
+See `scripts/Python/regression_demo.py` for a full example.
+
+---
+
+## C++ Build (benchmark binary and tests)
 
 Requires CMake ≥ 3.20 and a C++17 compiler. An internet connection is needed on first build to fetch GoogleTest.
 

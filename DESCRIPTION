@@ -1,8 +1,8 @@
 Package: faststochtree
-Title: Fast BART and XBART on Apple Silicon
+Title: Fast BART and XBART optimized for Apple Silicon
 Version: 0.1.0
 Authors@R: person("Drew", "Herren", role = c("aut", "cre"),
-                  email = "andrewscottherren@gmail.com")
+                  email = "opensourcedrewherren@gmail.com")
 Description: Optimized BART MCMC and grow-from-root (XBART) samplers,
     with a focus on Apple Silicon hardware.
 License: MIT + file LICENSE
