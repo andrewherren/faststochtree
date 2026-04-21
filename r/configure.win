@@ -1,5 +1,0 @@
-#!/bin/sh
-# Windows equivalent of configure — same logic, separate file required by R.
-for f in quantize mcmc gfr sampler; do
-    cp "../src/${f}.cpp" "src/${f}.cpp"
-done
