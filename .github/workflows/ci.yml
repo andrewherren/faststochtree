@@ -138,7 +138,7 @@ jobs:
         run: Rscript -e "install.packages('cpp11', repos='https://cloud.r-project.org')"
 
       - name: Install faststochtree
-        run: R CMD INSTALL r/
+        run: R CMD INSTALL .
         shell: bash
 
       - name: Smoke test
