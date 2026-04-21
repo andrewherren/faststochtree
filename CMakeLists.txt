@@ -17,6 +17,7 @@ add_library(faststochtree
     src/sampler.cpp
 )
 target_include_directories(faststochtree PUBLIC include)
+set_target_properties(faststochtree PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Benchmark executable
 add_executable(faststochtree_bench bench/main.cpp)
