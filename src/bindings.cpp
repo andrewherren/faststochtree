@@ -45,7 +45,7 @@ static bart::BARTConfig config_from_list(list cfg) {
     c.min_samples_leaf = get_int("min_samples_leaf", 5);
     c.alpha            = get_dbl("alpha",            0.95f);
     c.beta             = get_dbl("beta",             2.0f);
-    c.leaf_prior_var   = get_dbl("leaf_prior_var",   1.0f);
+    c.leaf_prior_var   = get_dbl("leaf_prior_var",   -1.0f);
     c.sigma2_shape     = get_dbl("sigma2_shape",     3.0f);
     c.sigma2_scale     = get_dbl("sigma2_scale",     1.0f);
     c.p_eval           = get_int("p_eval",           0);
