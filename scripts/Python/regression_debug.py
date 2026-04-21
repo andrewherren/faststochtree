@@ -18,11 +18,17 @@ y_test = f_test + rng.standard_normal(n_test)
 
 # Fit BART / XBART
 start = time.time()
-# model = fst.fit_bart(X, y, X_test)
-config = fst.BARTConfig()
-config.num_threads = 8
-config.p_eval = int(math.sqrt(p))
-model = fst.fit_xbart(X, y, X_test, config=config)
+num_trees = 200
+# mcmc_config = fst.BARTConfig()
+# mcmc_config.num_trees = num_trees
+# mcmc_config.leaf_prior_var = 1.0 / num_trees
+# model = fst.fit_bart(X, y, X_test, config=mcmc_config)
+gfr_config = fst.BARTConfig()
+gfr_config.num_trees = num_trees
+gfr_config.leaf_prior_var = 1.0 / num_trees
+gfr_config.num_threads = 8
+gfr_config.p_eval = int(math.sqrt(p))
+model = fst.fit_xbart(X, y, X_test, config=gfr_config)
 end = time.time()
 print(end - start)
 

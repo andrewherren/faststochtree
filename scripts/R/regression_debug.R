@@ -13,9 +13,19 @@ y_test <- f_test + rnorm(n_test)
 
 # Fit BART / XBART
 start <- Sys.time()
-# model <- faststochtree::fit_bart(X, y, X_test)
-model <- faststochtree::fit_xbart(X, y, X_test,
-                                  config = bart_config(num_threads = 8L, p_eval = as.integer(sqrt(p))))
+num_trees <- 200
+# mcmc_config <- bart_config(
+#   num_trees = num_trees,
+#   leaf_prior_var = 1 / num_trees
+# )
+# model <- faststochtree::fit_bart(X, y, X_test, config = mcmc_config)
+gfr_config <- bart_config(
+  num_threads = 8L, 
+  p_eval = as.integer(sqrt(p)), 
+  num_trees = num_trees,
+  leaf_prior_var = 1 / num_trees
+)
+model <- faststochtree::fit_xbart(X, y, X_test, config = gfr_config)
 end <- Sys.time()
 print(end - start)
 
