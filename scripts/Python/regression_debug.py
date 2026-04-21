@@ -1,5 +1,6 @@
 # Load libraries
 import time
+import math
 import numpy as np
 import faststochtree as fst
 import matplotlib.pyplot as plt
@@ -20,6 +21,7 @@ start = time.time()
 # model = fst.fit_bart(X, y, X_test)
 config = fst.BARTConfig()
 config.num_threads = 8
+config.p_eval = int(math.sqrt(p))
 model = fst.fit_xbart(X, y, X_test, config=config)
 end = time.time()
 print(end - start)
