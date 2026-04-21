@@ -7,6 +7,7 @@ on:
     branches: [main]
 
 jobs:
+  # ── C++ build, unit tests, and bench smoke tests ───────────────────────────
   build-and-test:
     strategy:
       fail-fast: false
@@ -28,7 +29,7 @@ jobs:
             build_args: --config Release
             ctest_args: -C Release
 
-    name: ${{ matrix.name }}
+    name: C++ / ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -65,4 +66,102 @@ jobs:
           ${{ matrix.bin_dir }}/faststochtree_bench \
             --mode xbart --n_train 500 --p 10 --trees 50 \
             --burnin 2 --samples 2 --iters 2
+        shell: bash
+
+  # ── Python wrapper smoke tests ─────────────────────────────────────────────
+  test-python:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-latest, windows-latest]
+
+    name: Python / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build dependencies
+        run: pip install scikit-build-core pybind11 numpy
+
+      - name: Install faststochtree
+        run: pip install --no-build-isolation python/
+
+      - name: Smoke test
+        run: |
+          python - <<'EOF'
+          import numpy as np
+          import faststochtree as fst
+
+          rng = np.random.default_rng(42)
+          n, p = 300, 10
+          X      = rng.uniform(size=(n, p)).astype(np.float32)
+          y      = np.sin(2 * np.pi * X[:, 0]).astype(np.float32) + rng.standard_normal(n).astype(np.float32)
+          X_test = rng.uniform(size=(20, p)).astype(np.float32)
+
+          m = fst.fit_xbart(X, y, X_test, n_burnin=2, n_samples=5, seed=1)
+          assert m.test_samples.shape == (5, 20)
+          assert m.sigma2_samples.shape == (5,)
+
+          preds = m.predict(rng.uniform(size=(10, p)).astype(np.float32))
+          assert preds.shape == (5, 10)
+
+          m2 = fst.fit_bart(X, y, X_test, n_burnin=5, n_samples=5, seed=1)
+          assert m2.test_samples.shape == (5, 20)
+
+          print("Python smoke test passed")
+          EOF
+        shell: bash
+
+  # ── R wrapper smoke tests ──────────────────────────────────────────────────
+  test-r:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-latest, windows-latest]
+
+    name: R / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "release"
+
+      - name: Install cpp11
+        run: Rscript -e "install.packages('cpp11', repos='https://cloud.r-project.org')"
+
+      - name: Install faststochtree
+        run: R CMD INSTALL .
+        shell: bash
+
+      - name: Smoke test
+        run: |
+          Rscript - <<'EOF'
+          library(faststochtree)
+
+          set.seed(42)
+          n <- 300; p <- 10
+          X      <- matrix(runif(n * p), n, p)
+          y      <- sin(2 * pi * X[, 1]) + rnorm(n)
+          X_test <- matrix(runif(20 * p), 20, p)
+
+          m <- fit_xbart(X, y, X_test, n_burnin = 2L, n_samples = 5L, seed = 1L)
+          stopifnot(identical(dim(test_samples(m)), c(5L, 20L)))
+          stopifnot(length(sigma2_samples(m)) == 5L)
+
+          preds <- predict(m, matrix(runif(10 * p), 10, p))
+          stopifnot(identical(dim(preds), c(5L, 10L)))
+
+          m2 <- fit_bart(X, y, X_test, n_burnin = 5L, n_samples = 5L, seed = 1L)
+          stopifnot(identical(dim(test_samples(m2)), c(5L, 20L)))
+
+          cat("R smoke test passed\n")
+          EOF
         shell: bash

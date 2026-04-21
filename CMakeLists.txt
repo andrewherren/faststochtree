@@ -17,6 +17,7 @@ add_library(faststochtree
     src/sampler.cpp
 )
 target_include_directories(faststochtree PUBLIC include)
+set_target_properties(faststochtree PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Benchmark executable
 add_executable(faststochtree_bench bench/main.cpp)
@@ -37,3 +38,13 @@ add_executable(test_bart tests/test_bart.cpp)
 target_link_libraries(test_bart PRIVATE faststochtree GTest::gtest_main)
 include(GoogleTest)
 gtest_discover_tests(test_bart)
+
+# Python bindings (built by scikit-build-core via: pip install ./python)
+option(BUILD_PYTHON_BINDINGS "Build pybind11 Python extension" OFF)
+if(BUILD_PYTHON_BINDINGS)
+    find_package(pybind11 REQUIRED)
+    pybind11_add_module(_faststochtree
+        python/src/faststochtree/_bindings.cpp)
+    target_link_libraries(_faststochtree PRIVATE faststochtree)
+    install(TARGETS _faststochtree DESTINATION faststochtree)
+endif()

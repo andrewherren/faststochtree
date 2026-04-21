@@ -18,7 +18,7 @@ struct BARTConfig {
     int   min_samples_leaf = 5;
     float alpha            = 0.95f;  // BART tree prior: P(split at depth d) = alpha/(1+d)^beta
     float beta             = 2.0f;
-    float leaf_prior_var   = 1.0f;   // tau: leaf value prior is N(0, tau)
+    float leaf_prior_var   = -1.0f;   // tau: leaf value prior is N(0, tau); -1.0 is a sentinel value which flags that this should be calibrated based on num_trees before use
     float sigma2_shape     = 3.0f;   // nu:     IG(nu/2, nu*lambda/2) prior on sigma2
     float sigma2_scale     = 1.0f;   // lambda
     int   p_eval           = 0;      // features evaluated per node: 0 = all p (gfr-v5)

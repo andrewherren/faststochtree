@@ -1,0 +1,12 @@
+^CMakeLists\.txt$
+^python$
+^bench$
+^tests$
+^build.*$
+^\.cmake-fetch-cache$
+^\.bench-builds$
+^\.venv$
+^\.github$
+^compile_commands\.json$
+^temp$
+^scripts$
