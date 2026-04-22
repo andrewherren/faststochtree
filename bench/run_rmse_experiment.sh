@@ -39,6 +39,7 @@ BASE_DATA_SEED=1234
 BASE_MODEL_SEED=4321
 TIMEOUT_S=0
 SKIP_EXISTING=true
+FORCE_REBUILD=false
 TAGS=()
 RESULTS_CSV="$SCRIPT_DIR/results/bench_results.csv"
 
@@ -63,6 +64,7 @@ OPTIONS:
   --timeout SECS         Kill a run after N seconds; 0 = none (default: 0)
   --results FILE         CSV path (default: bench/results/bench_results.csv)
   --no-skip              Re-run even if row already in CSV
+  --force-rebuild        Rebuild all tag binaries even if cached build exists
   --quick                n=2000, p=10, trees=50, burnin=50, samples=100, M=2, K=2
   -h, --help             Show this help
 EOF
@@ -87,6 +89,7 @@ while [[ $# -gt 0 ]]; do
     --timeout)     TIMEOUT_S="$2";       shift 2 ;;
     --results)     RESULTS_CSV="$2";     shift 2 ;;
     --no-skip)     SKIP_EXISTING=false;  shift ;;
+    --force-rebuild) FORCE_REBUILD=true; shift ;;
     --quick)
       N_VALS=(2000); P_VALS=(10); TREES=50; BURNIN=50; SAMPLES=100; M=2; K=2
       shift ;;
@@ -117,7 +120,8 @@ with_timeout() {
 build_for_tag() {
   local src="$1" bld="$2"
   local exe="$bld/faststochtree_bench"
-  if [[ -f "$exe" ]]; then printf "  (using cached build)\n"; return; fi
+  if [[ -f "$exe" ]] && ! $FORCE_REBUILD; then printf "  (using cached build)\n"; return; fi
+  rm -rf "$bld"
   cmake -S "$src" -B "$bld" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_COLOR_DIAGNOSTICS=OFF \
@@ -262,7 +266,7 @@ else
     local_bld="$BENCH_BUILDS/$tag"
     local_exe="$local_bld/faststochtree_bench"
 
-    if [[ ! -f "$local_exe" ]]; then
+    if [[ ! -f "$local_exe" ]] || $FORCE_REBUILD; then
       wt="$WT_BASE/$tag"
       git -C "$REPO_DIR" worktree add --quiet "$wt" "refs/tags/$tag"
       printf "  Building..."
