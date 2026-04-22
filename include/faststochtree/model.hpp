@@ -14,7 +14,7 @@ namespace bart {
 
 struct BARTConfig {
     int   num_trees        = 200;
-    int   tree_depth       = 7;      // max leaf depth; tree has 2^depth leaf slots
+    int   tree_depth       = 8;      // max leaf depth; tree has 2^depth leaf slots
     int   min_samples_leaf = 5;
     float alpha            = 0.95f;  // BART tree prior: P(split at depth d) = alpha/(1+d)^beta
     float beta             = 2.0f;
@@ -28,9 +28,9 @@ struct BARTConfig {
 // Pre-allocated scratch workspace — one per BARTState, reused every sweep.
 // Eliminates per-call heap allocations in propose_move and sample_leaves.
 struct Workspace {
-    // K=4 multilane scatter buffers for sample_leaves (depth=7: size 256)
-    float s0[256], s1[256], s2[256], s3[256];
-    int   c0[256], c1[256], c2[256], c3[256];
+    // K=4 multilane scatter buffers for sample_leaves (depth=8: size 512)
+    float s0[512], s1[512], s2[512], s3[512];
+    int   c0[512], c1[512], c2[512], c3[512];
     // Scratch for tree.leaves() / tree.leaf_parents() — avoid per-call alloc
     std::vector<int> leaves_buf;
     std::vector<int> leaf_parents_buf;
