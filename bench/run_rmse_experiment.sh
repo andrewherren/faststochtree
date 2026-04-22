@@ -168,6 +168,7 @@ run_one() {
           --iters      1              \
           --seed       "$data_seed"   \
           --model_seed "$model_seed"  \
+          --csv        /dev/null      \
           2>&1) || exit_code=$?
       else
         raw=$(with_timeout "$bench_exe" \
@@ -180,6 +181,7 @@ run_one() {
           --iters      1              \
           --seed       "$data_seed"   \
           --model_seed "$model_seed"  \
+          --csv        /dev/null      \
           2>&1) || exit_code=$?
       fi
 
