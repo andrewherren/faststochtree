@@ -52,7 +52,7 @@ int main(int argc, char** argv) {
     if (xbart) cfg.p_eval = (int)std::sqrt((float)p);
     cfg.num_threads = num_threads;
 
-    const char* tag = xbart ? "gfr-v13-ws-reuse" : "v13-flat-obs";
+    const char* tag = xbart ? "gfr-v14-depth7" : "v14-depth7";
     printf("faststochtree %s benchmark (%s)\n", xbart ? "XBART" : "BART", tag);
     printf("  n_train=%d  n_test=%d  p=%d  trees=%d\n",
            n_train, n_test, p, num_trees);
