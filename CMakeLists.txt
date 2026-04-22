@@ -36,8 +36,13 @@ FetchContent_MakeAvailable(googletest)
 
 add_executable(test_bart tests/test_bart.cpp)
 target_link_libraries(test_bart PRIVATE faststochtree GTest::gtest_main)
+
+add_executable(test_tree tests/test_tree.cpp)
+target_link_libraries(test_tree PRIVATE faststochtree GTest::gtest_main)
+
 include(GoogleTest)
 gtest_discover_tests(test_bart)
+gtest_discover_tests(test_tree)
 
 # Python bindings (built by scikit-build-core via: pip install ./python)
 option(BUILD_PYTHON_BINDINGS "Build pybind11 Python extension" OFF)

@@ -42,7 +42,7 @@ struct Tree {
           threshold(full_size + 1, 0),
           leaf_value(full_size + 1, 0.f) { split_var[1] = -1; }
 
-    bool is_leaf(int k) const { return k > half_size || split_var[k] < 0; }
+    bool is_leaf(int k) const { return split_var[k] < 0; }
 
     // Depth of node k in the heap (root = 0).
     static int depth_of(int k) {
