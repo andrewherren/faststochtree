@@ -41,7 +41,7 @@ static bart::BARTConfig config_from_list(list cfg) {
         return def;
     };
     c.num_trees        = get_int("num_trees",        200);
-    c.tree_depth       = get_int("tree_depth",       7);
+    c.tree_depth       = get_int("tree_depth",       8);
     c.min_samples_leaf = get_int("min_samples_leaf", 5);
     c.alpha            = get_dbl("alpha",            0.95f);
     c.beta             = get_dbl("beta",             2.0f);
