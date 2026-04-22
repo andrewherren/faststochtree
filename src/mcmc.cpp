@@ -213,7 +213,7 @@ void sample_leaves(Tree& tree, const float* resid, const float* pred_off,
                    int n, float sigma2, const BARTConfig& cfg, RNG& rng,
                    const std::vector<int>& leaf_idx, Workspace& ws) {
     float tau = cfg.leaf_prior_var;
-    int   sz  = tree.full_size + 1;  // 256 for depth=7
+    int   sz  = tree.full_size + 1;  // 512 for depth=8
 
     // Zero only the live portion of each lane (sz entries = 512 bytes each)
     std::memset(ws.s0, 0, sz * sizeof(float)); std::memset(ws.s1, 0, sz * sizeof(float));
