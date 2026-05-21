@@ -92,6 +92,37 @@ fit_xbart <- function(X, y, X_test,
   structure(list(ptr = ptr, y_mean = sc$y_mean, y_sd = sc$y_sd), class = "BARTModel")
 }
 
+#' Fit a warm-start BART model (GFR burn-in followed by MCMC sampling)
+#'
+#' @param X              Numeric matrix [n × p] of training covariates
+#' @param y              Numeric vector [n] of training responses
+#' @param X_test         Numeric matrix [n_test × p] for in-sample test predictions
+#' @param n_gfr_burnin   Number of GFR warm-up sweeps (default 20)
+#' @param n_mcmc_burnin  Additional MCMC burn-in after GFR (default 0)
+#' @param n_samples      Number of MCMC posterior samples to retain (default 200)
+#' @param seed           Integer random seed (default 42)
+#' @param keep_gfr_samples If TRUE, prepend GFR burn-in draws to the result (default FALSE)
+#' @param config         Named list from bart_config()
+#' @return A BARTModel object
+#' @export
+fit_warmstart_bart <- function(X, y, X_test,
+                                n_gfr_burnin     = 20L,
+                                n_mcmc_burnin    = 0L,
+                                n_samples        = 200L,
+                                seed             = 42L,
+                                keep_gfr_samples = FALSE,
+                                config           = bart_config()) {
+  sc <- .scale_y(y)
+  if (config$leaf_prior_var < 0) {
+    config$leaf_prior_var <- 1.0 / config$num_trees
+  }
+  ptr <- fit_warmstart_bart_cpp(as.matrix(X), sc$y_scaled, as.matrix(X_test),
+                                 as.integer(n_gfr_burnin), as.integer(n_mcmc_burnin),
+                                 as.integer(n_samples), as.integer(seed),
+                                 as.logical(keep_gfr_samples), config)
+  structure(list(ptr = ptr, y_mean = sc$y_mean, y_sd = sc$y_sd), class = "BARTModel")
+}
+
 #' Posterior predictive samples for new observations
 #'
 #' @param object  A BARTModel object returned by fit_bart() or fit_xbart()

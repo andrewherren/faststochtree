@@ -8,6 +8,10 @@ fit_xbart_cpp <- function(X, y, X_test, n_burnin, n_samples, seed, config) {
   .Call(`_faststochtree_fit_xbart_cpp`, X, y, X_test, n_burnin, n_samples, seed, config)
 }
 
+fit_warmstart_bart_cpp <- function(X, y, X_test, n_gfr_burnin, n_mcmc_burnin, n_samples, seed, keep_gfr_samples, config) {
+  .Call(`_faststochtree_fit_warmstart_bart_cpp`, X, y, X_test, n_gfr_burnin, n_mcmc_burnin, n_samples, seed, keep_gfr_samples, config)
+}
+
 predict_cpp <- function(model, X_new) {
   .Call(`_faststochtree_predict_cpp`, model, X_new)
 }

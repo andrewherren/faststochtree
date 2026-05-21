@@ -20,6 +20,13 @@ extern "C" SEXP _faststochtree_fit_xbart_cpp(SEXP X, SEXP y, SEXP X_test, SEXP n
   END_CPP11
 }
 // bindings.cpp
+external_pointer<bart::BARTModel> fit_warmstart_bart_cpp(doubles_matrix<> X, doubles y, doubles_matrix<> X_test, int n_gfr_burnin, int n_mcmc_burnin, int n_samples, int seed, bool keep_gfr_samples, list config);
+extern "C" SEXP _faststochtree_fit_warmstart_bart_cpp(SEXP X, SEXP y, SEXP X_test, SEXP n_gfr_burnin, SEXP n_mcmc_burnin, SEXP n_samples, SEXP seed, SEXP keep_gfr_samples, SEXP config) {
+  BEGIN_CPP11
+    return cpp11::as_sexp(fit_warmstart_bart_cpp(cpp11::as_cpp<cpp11::decay_t<doubles_matrix<>>>(X), cpp11::as_cpp<cpp11::decay_t<doubles>>(y), cpp11::as_cpp<cpp11::decay_t<doubles_matrix<>>>(X_test), cpp11::as_cpp<cpp11::decay_t<int>>(n_gfr_burnin), cpp11::as_cpp<cpp11::decay_t<int>>(n_mcmc_burnin), cpp11::as_cpp<cpp11::decay_t<int>>(n_samples), cpp11::as_cpp<cpp11::decay_t<int>>(seed), cpp11::as_cpp<cpp11::decay_t<bool>>(keep_gfr_samples), cpp11::as_cpp<cpp11::decay_t<list>>(config)));
+  END_CPP11
+}
+// bindings.cpp
 doubles_matrix<> predict_cpp(external_pointer<bart::BARTModel> model, doubles_matrix<> X_new);
 extern "C" SEXP _faststochtree_predict_cpp(SEXP model, SEXP X_new) {
   BEGIN_CPP11
@@ -43,11 +50,12 @@ extern "C" SEXP _faststochtree_sigma2_samples_cpp(SEXP model) {
 
 extern "C" {
 static const R_CallMethodDef CallEntries[] = {
-    {"_faststochtree_fit_bart_cpp",       (DL_FUNC) &_faststochtree_fit_bart_cpp,       7},
-    {"_faststochtree_fit_xbart_cpp",      (DL_FUNC) &_faststochtree_fit_xbart_cpp,      7},
-    {"_faststochtree_predict_cpp",        (DL_FUNC) &_faststochtree_predict_cpp,        2},
-    {"_faststochtree_sigma2_samples_cpp", (DL_FUNC) &_faststochtree_sigma2_samples_cpp, 1},
-    {"_faststochtree_test_samples_cpp",   (DL_FUNC) &_faststochtree_test_samples_cpp,   1},
+    {"_faststochtree_fit_bart_cpp",           (DL_FUNC) &_faststochtree_fit_bart_cpp,           7},
+    {"_faststochtree_fit_warmstart_bart_cpp", (DL_FUNC) &_faststochtree_fit_warmstart_bart_cpp, 9},
+    {"_faststochtree_fit_xbart_cpp",          (DL_FUNC) &_faststochtree_fit_xbart_cpp,          7},
+    {"_faststochtree_predict_cpp",            (DL_FUNC) &_faststochtree_predict_cpp,            2},
+    {"_faststochtree_sigma2_samples_cpp",     (DL_FUNC) &_faststochtree_sigma2_samples_cpp,     1},
+    {"_faststochtree_test_samples_cpp",       (DL_FUNC) &_faststochtree_test_samples_cpp,       1},
     {NULL, NULL, 0}
 };
 }

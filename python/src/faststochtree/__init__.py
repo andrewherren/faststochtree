@@ -4,6 +4,7 @@ from ._faststochtree import BARTConfig
 from ._faststochtree import BARTModel as _BARTModel
 from ._faststochtree import fit_bart as _fit_bart
 from ._faststochtree import fit_xbart as _fit_xbart
+from ._faststochtree import fit_warmstart_bart as _fit_warmstart_bart
 
 
 class BARTModel:
@@ -65,4 +66,22 @@ def fit_xbart(X, y, X_test, n_burnin: int = 15, n_samples: int = 25,
         y_mean, y_sd)
 
 
-__all__ = ["BARTConfig", "BARTModel", "fit_bart", "fit_xbart"]
+def fit_warmstart_bart(X, y, X_test,
+                       n_gfr_burnin: int = 20, n_mcmc_burnin: int = 0,
+                       n_samples: int = 200,
+                       seed: int = 42,
+                       keep_gfr_samples: bool = False,
+                       config: BARTConfig = None) -> BARTModel:
+    if config is None:
+        config = BARTConfig()
+    y_scaled, y_mean, y_sd = _scale_y(y)
+    if config.leaf_prior_var < 0.0:
+        config.leaf_prior_var = 1.0 / config.num_trees
+    return BARTModel(
+        _fit_warmstart_bart(X, y_scaled, X_test,
+                             n_gfr_burnin, n_mcmc_burnin, n_samples,
+                             seed, keep_gfr_samples, config),
+        y_mean, y_sd)
+
+
+__all__ = ["BARTConfig", "BARTModel", "fit_bart", "fit_xbart", "fit_warmstart_bart"]

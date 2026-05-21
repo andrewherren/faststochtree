@@ -106,6 +106,65 @@ BARTResult run_xbart(const float* X,      const float* y, int n, int p,
 }
 
 
+BARTResult run_warmstart_bart(const float* X,      const float* y, int n, int p,
+                               const float* X_test, int n_test,
+                               const BARTConfig& cfg,
+                               int n_gfr_burnin, int n_mcmc_burnin, int n_samples,
+                               RNG& rng, bool keep_gfr_samples) {
+    BARTState state;
+    state.n  = n;
+    state.p  = p;
+    state.Xq = quantize(X, n, p);
+    state.y  = y;
+
+    init_state(state, cfg, rng);
+    state.gfr_hist_ws.alloc(n, p, state.trees[0].full_size);
+    if (cfg.num_threads > 1)
+        state.thread_pool = std::make_unique<ThreadPool>(cfg.num_threads);
+
+    QuantizedX test_qx;
+    if (n_test > 0 && X_test != nullptr)
+        test_qx = quantize_with_cuts(X_test, n_test, state.Xq);
+
+    BARTResult result;
+    result.samples.reserve(n_samples + (keep_gfr_samples ? n_gfr_burnin : 0));
+    result.sigma2_samples.reserve(n_samples + (keep_gfr_samples ? n_gfr_burnin : 0));
+
+    auto collect = [&]() {
+        std::vector<float> pred(n, 0.f);
+        for (int t = 0; t < cfg.num_trees; t++)
+            for (int i = 0; i < n; i++)
+                pred[i] += state.pred[t][i];
+        result.samples.push_back(std::move(pred));
+
+        if (n_test > 0) {
+            std::vector<float> test_pred(n_test, 0.f);
+            for (int t = 0; t < cfg.num_trees; t++)
+                for (int i = 0; i < n_test; i++)
+                    test_pred[i] += state.trees[t].leaf_value[
+                        state.trees[t].traverse(test_qx.data.data(), i, n_test)];
+            result.test_samples.push_back(std::move(test_pred));
+        }
+
+        result.sigma2_samples.push_back(state.sigma2);
+        result.forests.push_back(state.trees);
+    };
+
+    for (int s = 0; s < n_gfr_burnin; s++) {
+        gfr_sweep(state, cfg, rng);
+        if (keep_gfr_samples) collect();
+    }
+
+    for (int s = 0; s < n_mcmc_burnin; s++) mcmc_sweep(state, cfg, rng);
+
+    for (int s = 0; s < n_samples; s++) {
+        mcmc_sweep(state, cfg, rng);
+        collect();
+    }
+
+    return result;
+}
+
 // ── BARTModel::predict ────────────────────────────────────────────────────────
 
 std::vector<float> BARTModel::predict(const float* X_new, int n_new) const {
@@ -161,6 +220,21 @@ BARTModel fit_xbart(const float* X,      const float* y, int n, int p,
     RNG rng(static_cast<unsigned>(seed));
     QuantizedX train_qx = quantize(X, n, p);
     BARTResult res = run_xbart(X, y, n, p, X_test, n_test, cfg, n_burnin, n_samples, rng);
+    QuantizedX cuts_only = std::move(train_qx);
+    cuts_only.data.clear();
+    return make_model(res, std::move(cuts_only));
+}
+
+BARTModel fit_warmstart_bart(const float* X,      const float* y, int n, int p,
+                              const float* X_test, int n_test,
+                              const BARTConfig& cfg,
+                              int n_gfr_burnin, int n_mcmc_burnin, int n_samples,
+                              int seed, bool keep_gfr_samples) {
+    RNG rng(static_cast<unsigned>(seed));
+    QuantizedX train_qx = quantize(X, n, p);
+    BARTResult res = run_warmstart_bart(X, y, n, p, X_test, n_test, cfg,
+                                        n_gfr_burnin, n_mcmc_burnin, n_samples,
+                                        rng, keep_gfr_samples);
     QuantizedX cuts_only = std::move(train_qx);
     cuts_only.data.clear();
     return make_model(res, std::move(cuts_only));

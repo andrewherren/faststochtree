@@ -85,3 +85,85 @@ TEST(BARTCorrectness, ReasonableRMSE) {
     EXPECT_LT(sigma2_post, 4.0);
     EXPECT_GT(sigma2_post, 0.1);
 }
+
+TEST(BARTWarmStart, RunsWithoutCrash) {
+    int n = 200, p = 5;
+    std::vector<float> X, y;
+    simulate(n, p, 42, X, y);
+
+    bart::BARTConfig cfg;
+    cfg.num_trees      = 20;
+    cfg.leaf_prior_var = 0.25f / cfg.num_trees;
+    cfg.num_threads    = 1;
+
+    bart::RNG rng(123);
+    auto result = bart::run_warmstart_bart(X.data(), y.data(), n, p,
+                                           nullptr, 0, cfg,
+                                           /*n_gfr_burnin=*/10,
+                                           /*n_mcmc_burnin=*/0,
+                                           /*n_samples=*/50, rng);
+
+    EXPECT_EQ((int)result.samples.size(),        50);
+    EXPECT_EQ((int)result.sigma2_samples.size(), 50);
+    for (float s2 : result.sigma2_samples) {
+        EXPECT_GT(s2, 0.0f);
+        EXPECT_TRUE(std::isfinite(s2));
+    }
+}
+
+TEST(BARTWarmStart, KeepGFRSamples) {
+    int n = 200, p = 5;
+    std::vector<float> X, y;
+    simulate(n, p, 42, X, y);
+
+    bart::BARTConfig cfg;
+    cfg.num_trees      = 20;
+    cfg.leaf_prior_var = 0.25f / cfg.num_trees;
+    cfg.num_threads    = 1;
+
+    bart::RNG rng(7);
+    auto result = bart::run_warmstart_bart(X.data(), y.data(), n, p,
+                                           nullptr, 0, cfg,
+                                           /*n_gfr_burnin=*/5,
+                                           /*n_mcmc_burnin=*/0,
+                                           /*n_samples=*/20, rng,
+                                           /*keep_gfr_samples=*/true);
+
+    // 5 GFR samples prepended + 20 MCMC samples = 25 total
+    EXPECT_EQ((int)result.samples.size(), 25);
+    EXPECT_EQ((int)result.sigma2_samples.size(), 25);
+}
+
+TEST(BARTWarmStart, ReasonableRMSE) {
+    int n = 500, p = 5;
+    float sigma_true = 1.0f;
+    std::vector<float> X, y;
+    simulate(n, p, 99, X, y, sigma_true);
+
+    bart::BARTConfig cfg;
+    cfg.num_trees      = 50;
+    cfg.leaf_prior_var = 0.25f / cfg.num_trees;
+    cfg.sigma2_scale   = sigma_true * sigma_true;
+    cfg.num_threads    = 1;
+
+    bart::RNG rng(42);
+    auto result = bart::run_warmstart_bart(X.data(), y.data(), n, p,
+                                           nullptr, 0, cfg,
+                                           /*n_gfr_burnin=*/20,
+                                           /*n_mcmc_burnin=*/0,
+                                           /*n_samples=*/100, rng);
+
+    std::vector<double> post_mean(n, 0.0);
+    int ns = (int)result.samples.size();
+    for (auto& sample : result.samples)
+        for (int i = 0; i < n; i++)
+            post_mean[i] += sample[i] / ns;
+
+    double rss = 0.0;
+    for (int i = 0; i < n; i++) {
+        double err = y[i] - post_mean[i];
+        rss += err * err;
+    }
+    double rmse = std::sqrt(rss / n);
+    EXPECT_LT(rmse, 2.0) << "RMSE=" << rmse << " is unexpectedly large";
+}

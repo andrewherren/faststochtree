@@ -21,6 +21,16 @@ BARTResult run_xbart(const float* X,      const float* y, int n, int p,
                      const float* X_test, int n_test,
                      const BARTConfig& cfg, int n_burnin, int n_samples, RNG& rng);
 
+// GFR burn-in followed by MCMC sampling. Runs n_gfr_burnin GFR sweeps to
+// warm-start the forest state, then n_mcmc_burnin additional MCMC sweeps
+// (typically 0), then collects n_samples MCMC draws. If keep_gfr_samples is
+// true, the GFR burn-in draws are prepended to the result forests/samples.
+BARTResult run_warmstart_bart(const float* X,      const float* y, int n, int p,
+                               const float* X_test, int n_test,
+                               const BARTConfig& cfg,
+                               int n_gfr_burnin, int n_mcmc_burnin, int n_samples,
+                               RNG& rng, bool keep_gfr_samples = false);
+
 // ── Public model object for language bindings ─────────────────────────────────
 //
 // Holds everything needed to make out-of-sample predictions after fitting:
@@ -55,5 +65,11 @@ BARTModel fit_bart(const float* X,      const float* y, int n, int p,
 BARTModel fit_xbart(const float* X,      const float* y, int n, int p,
                     const float* X_test, int n_test,
                     const BARTConfig& cfg, int n_burnin, int n_samples, int seed);
+
+BARTModel fit_warmstart_bart(const float* X,      const float* y, int n, int p,
+                              const float* X_test, int n_test,
+                              const BARTConfig& cfg,
+                              int n_gfr_burnin, int n_mcmc_burnin, int n_samples,
+                              int seed, bool keep_gfr_samples = false);
 
 } // namespace bart

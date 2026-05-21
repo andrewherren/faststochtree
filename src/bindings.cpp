@@ -104,6 +104,32 @@ external_pointer<bart::BARTModel> fit_xbart_cpp(
     return external_pointer<bart::BARTModel>(m, &bart_model_finalizer);
 }
 
+// ── fit_warmstart_bart_cpp ────────────────────────────────────────────────────
+
+[[cpp11::register]]
+external_pointer<bart::BARTModel> fit_warmstart_bart_cpp(
+        doubles_matrix<> X, doubles y,
+        doubles_matrix<> X_test,
+        int n_gfr_burnin, int n_mcmc_burnin, int n_samples, int seed,
+        bool keep_gfr_samples,
+        list config) {
+
+    bart::BARTConfig cfg = config_from_list(config);
+    std::vector<float> Xf  = to_float_rowmajor(X);
+    std::vector<float> yf  = to_float_vec(y);
+    std::vector<float> Xtf = to_float_rowmajor(X_test);
+
+    int n      = X.nrow(), p = X.ncol();
+    int n_test = X_test.nrow();
+
+    auto* m = new bart::BARTModel(
+        bart::fit_warmstart_bart(Xf.data(), yf.data(), n, p,
+                                  Xtf.data(), n_test, cfg,
+                                  n_gfr_burnin, n_mcmc_burnin, n_samples,
+                                  seed, keep_gfr_samples));
+    return external_pointer<bart::BARTModel>(m, &bart_model_finalizer);
+}
+
 // ── predict_cpp ───────────────────────────────────────────────────────────────
 
 [[cpp11::register]]

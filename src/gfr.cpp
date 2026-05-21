@@ -357,9 +357,14 @@ void gfr_sweep(BARTState& state, const BARTConfig& cfg, RNG& rng) {
                 li[fo[idx]] = seg.node;
         }
 
-        // Step 3: exclusive prefix sum of lc → ls
-        int running = 0;
-        for (int k = 1; k <= full_size; k++) { ls[k] = running; running += lc[k]; }
+        // Step 3: set leaf_start directly from the GFR partition positions.
+        // A sequential prefix sum over node indices would be wrong: GFR lays out
+        // flat_obs in BFS traversal order, not node-index order, so for any tree
+        // deeper than one level the two orderings diverge and MCMC proposals
+        // (propose_grow / propose_prune) would read out of bounds.
+        std::fill(ls.begin(), ls.end(), 0);
+        for (auto& seg : ws.leaf_segs)
+            ls[seg.node] = seg.beg;
 
         // zeros as pred_off: residual already fully restored above
         sample_leaves(state.trees[t], state.residual.data(), state.ws.zeros.data(),
