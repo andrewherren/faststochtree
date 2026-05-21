@@ -23,8 +23,7 @@ static std::vector<float> to_float_vec(doubles v) {
     return out;
 }
 
-// BARTConfig from a named R list.
-static bart::BARTConfig config_from_list(list cfg) {
+static bart::BARTConfig bart_config_from_list(list cfg) {
     bart::BARTConfig c;
     auto get_int = [&](const char* nm, int def) -> int {
         if (cfg.names().size() == 0) return def;
@@ -53,8 +52,12 @@ static bart::BARTConfig config_from_list(list cfg) {
     return c;
 }
 
-// Finalizer called when the R external pointer is GC'd.
+// Finalizers called when the R external pointer is GC'd.
 static void bart_model_finalizer(bart::BARTModel* m) { delete m; }
+static void bcf_model_finalizer(bart::BCFModel* m)   { delete m; }
+
+// BARTConfig from a named R list (shared by BART and BCF helpers).
+static bart::BARTConfig bart_config_from_list(list cfg);
 
 // ── fit_bart_cpp ──────────────────────────────────────────────────────────────
 
@@ -65,7 +68,7 @@ external_pointer<bart::BARTModel> fit_bart_cpp(
         int n_burnin, int n_samples, int seed,
         list config) {
 
-    bart::BARTConfig cfg = config_from_list(config);
+    bart::BARTConfig cfg = bart_config_from_list(config);
     std::vector<float> Xf  = to_float_rowmajor(X);
     std::vector<float> yf  = to_float_vec(y);
     std::vector<float> Xtf = to_float_rowmajor(X_test);
@@ -89,7 +92,7 @@ external_pointer<bart::BARTModel> fit_xbart_cpp(
         int n_burnin, int n_samples, int seed,
         list config) {
 
-    bart::BARTConfig cfg = config_from_list(config);
+    bart::BARTConfig cfg = bart_config_from_list(config);
     std::vector<float> Xf  = to_float_rowmajor(X);
     std::vector<float> yf  = to_float_vec(y);
     std::vector<float> Xtf = to_float_rowmajor(X_test);
@@ -114,7 +117,7 @@ external_pointer<bart::BARTModel> fit_warmstart_bart_cpp(
         bool keep_gfr_samples,
         list config) {
 
-    bart::BARTConfig cfg = config_from_list(config);
+    bart::BARTConfig cfg = bart_config_from_list(config);
     std::vector<float> Xf  = to_float_rowmajor(X);
     std::vector<float> yf  = to_float_vec(y);
     std::vector<float> Xtf = to_float_rowmajor(X_test);
@@ -162,6 +165,154 @@ doubles_matrix<> test_samples_cpp(external_pointer<bart::BARTModel> model) {
 
 [[cpp11::register]]
 doubles sigma2_samples_cpp(external_pointer<bart::BARTModel> model) {
+    writable::doubles out(model->n_samples);
+    for (int i = 0; i < model->n_samples; i++)
+        out[i] = static_cast<double>(model->sigma2_samples[i]);
+    return out;
+}
+
+// ── BCF helpers ───────────────────────────────────────────────────────────────
+
+static bart::BCFConfig bcf_config_from_lists(list mu_cfg_list, list tau_cfg_list) {
+    bart::BCFConfig cfg;
+    cfg.mu_config  = bart_config_from_list(mu_cfg_list);
+    cfg.tau_config = bart_config_from_list(tau_cfg_list);
+    return cfg;
+}
+
+// ── fit_bcf_cpp ───────────────────────────────────────────────────────────────
+
+[[cpp11::register]]
+external_pointer<bart::BCFModel> fit_bcf_cpp(
+        doubles_matrix<> X, doubles y, doubles z, doubles pi_hat,
+        doubles_matrix<> X_test, doubles pi_hat_test,
+        int n_burnin, int n_samples, int seed,
+        list mu_config, list tau_config) {
+
+    bart::BCFConfig cfg = bcf_config_from_lists(mu_config, tau_config);
+    std::vector<float> Xf     = to_float_rowmajor(X);
+    std::vector<float> yf     = to_float_vec(y);
+    std::vector<float> zf     = to_float_vec(z);
+    std::vector<float> pif    = to_float_vec(pi_hat);
+    std::vector<float> Xtf    = to_float_rowmajor(X_test);
+    std::vector<float> pitf   = to_float_vec(pi_hat_test);
+
+    int n      = X.nrow(), p = X.ncol();
+    int n_test = X_test.nrow();
+
+    auto* m = new bart::BCFModel(
+        bart::fit_bcf(Xf.data(), yf.data(), zf.data(), pif.data(), n, p,
+                      Xtf.data(), pitf.data(), n_test, cfg,
+                      n_burnin, n_samples, seed));
+    return external_pointer<bart::BCFModel>(m, &bcf_model_finalizer);
+}
+
+// ── fit_xbcf_cpp ──────────────────────────────────────────────────────────────
+
+[[cpp11::register]]
+external_pointer<bart::BCFModel> fit_xbcf_cpp(
+        doubles_matrix<> X, doubles y, doubles z, doubles pi_hat,
+        doubles_matrix<> X_test, doubles pi_hat_test,
+        int n_burnin, int n_samples, int seed,
+        list mu_config, list tau_config) {
+
+    bart::BCFConfig cfg = bcf_config_from_lists(mu_config, tau_config);
+    std::vector<float> Xf     = to_float_rowmajor(X);
+    std::vector<float> yf     = to_float_vec(y);
+    std::vector<float> zf     = to_float_vec(z);
+    std::vector<float> pif    = to_float_vec(pi_hat);
+    std::vector<float> Xtf    = to_float_rowmajor(X_test);
+    std::vector<float> pitf   = to_float_vec(pi_hat_test);
+
+    int n      = X.nrow(), p = X.ncol();
+    int n_test = X_test.nrow();
+
+    auto* m = new bart::BCFModel(
+        bart::fit_xbcf(Xf.data(), yf.data(), zf.data(), pif.data(), n, p,
+                       Xtf.data(), pitf.data(), n_test, cfg,
+                       n_burnin, n_samples, seed));
+    return external_pointer<bart::BCFModel>(m, &bcf_model_finalizer);
+}
+
+// ── fit_warmstart_bcf_cpp ─────────────────────────────────────────────────────
+
+[[cpp11::register]]
+external_pointer<bart::BCFModel> fit_warmstart_bcf_cpp(
+        doubles_matrix<> X, doubles y, doubles z, doubles pi_hat,
+        doubles_matrix<> X_test, doubles pi_hat_test,
+        int n_gfr_burnin, int n_mcmc_burnin, int n_samples, int seed,
+        bool keep_gfr_samples,
+        list mu_config, list tau_config) {
+
+    bart::BCFConfig cfg = bcf_config_from_lists(mu_config, tau_config);
+    std::vector<float> Xf     = to_float_rowmajor(X);
+    std::vector<float> yf     = to_float_vec(y);
+    std::vector<float> zf     = to_float_vec(z);
+    std::vector<float> pif    = to_float_vec(pi_hat);
+    std::vector<float> Xtf    = to_float_rowmajor(X_test);
+    std::vector<float> pitf   = to_float_vec(pi_hat_test);
+
+    int n      = X.nrow(), p = X.ncol();
+    int n_test = X_test.nrow();
+
+    auto* m = new bart::BCFModel(
+        bart::fit_warmstart_bcf(Xf.data(), yf.data(), zf.data(), pif.data(), n, p,
+                                 Xtf.data(), pitf.data(), n_test, cfg,
+                                 n_gfr_burnin, n_mcmc_burnin, n_samples,
+                                 seed, keep_gfr_samples));
+    return external_pointer<bart::BCFModel>(m, &bcf_model_finalizer);
+}
+
+// ── BCF model accessors ───────────────────────────────────────────────────────
+
+[[cpp11::register]]
+doubles_matrix<> predict_tau_cpp(external_pointer<bart::BCFModel> model,
+                                  doubles_matrix<> X_new) {
+    std::vector<float> Xf = to_float_rowmajor(X_new);
+    int n_new = X_new.nrow();
+    std::vector<float> out = model->predict_tau(Xf.data(), n_new);
+    writable::doubles_matrix<> result(model->n_samples, n_new);
+    for (int s = 0; s < model->n_samples; s++)
+        for (int i = 0; i < n_new; i++)
+            result(s, i) = static_cast<double>(out[s * n_new + i]);
+    return result;
+}
+
+[[cpp11::register]]
+doubles_matrix<> predict_mu_cpp(external_pointer<bart::BCFModel> model,
+                                 doubles_matrix<> X_new_mu) {
+    std::vector<float> Xf = to_float_rowmajor(X_new_mu);
+    int n_new = X_new_mu.nrow();
+    std::vector<float> out = model->predict_mu(Xf.data(), n_new);
+    writable::doubles_matrix<> result(model->n_samples, n_new);
+    for (int s = 0; s < model->n_samples; s++)
+        for (int i = 0; i < n_new; i++)
+            result(s, i) = static_cast<double>(out[s * n_new + i]);
+    return result;
+}
+
+[[cpp11::register]]
+doubles_matrix<> test_tau_samples_cpp(external_pointer<bart::BCFModel> model) {
+    writable::doubles_matrix<> result(model->n_samples, model->n_test);
+    for (int s = 0; s < model->n_samples; s++)
+        for (int i = 0; i < model->n_test; i++)
+            result(s, i) = static_cast<double>(
+                model->test_tau[s * model->n_test + i]);
+    return result;
+}
+
+[[cpp11::register]]
+doubles_matrix<> test_mu_samples_cpp(external_pointer<bart::BCFModel> model) {
+    writable::doubles_matrix<> result(model->n_samples, model->n_test);
+    for (int s = 0; s < model->n_samples; s++)
+        for (int i = 0; i < model->n_test; i++)
+            result(s, i) = static_cast<double>(
+                model->test_mu[s * model->n_test + i]);
+    return result;
+}
+
+[[cpp11::register]]
+doubles sigma2_bcf_samples_cpp(external_pointer<bart::BCFModel> model) {
     writable::doubles out(model->n_samples);
     for (int i = 0; i < model->n_samples; i++)
         out[i] = static_cast<double>(model->sigma2_samples[i]);

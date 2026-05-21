@@ -47,6 +47,62 @@ extern "C" SEXP _faststochtree_sigma2_samples_cpp(SEXP model) {
     return cpp11::as_sexp(sigma2_samples_cpp(cpp11::as_cpp<cpp11::decay_t<external_pointer<bart::BARTModel>>>(model)));
   END_CPP11
 }
+// bindings.cpp
+external_pointer<bart::BCFModel> fit_bcf_cpp(doubles_matrix<> X, doubles y, doubles z, doubles pi_hat, doubles_matrix<> X_test, doubles pi_hat_test, int n_burnin, int n_samples, int seed, list mu_config, list tau_config);
+extern "C" SEXP _faststochtree_fit_bcf_cpp(SEXP X, SEXP y, SEXP z, SEXP pi_hat, SEXP X_test, SEXP pi_hat_test, SEXP n_burnin, SEXP n_samples, SEXP seed, SEXP mu_config, SEXP tau_config) {
+  BEGIN_CPP11
+    return cpp11::as_sexp(fit_bcf_cpp(cpp11::as_cpp<cpp11::decay_t<doubles_matrix<>>>(X), cpp11::as_cpp<cpp11::decay_t<doubles>>(y), cpp11::as_cpp<cpp11::decay_t<doubles>>(z), cpp11::as_cpp<cpp11::decay_t<doubles>>(pi_hat), cpp11::as_cpp<cpp11::decay_t<doubles_matrix<>>>(X_test), cpp11::as_cpp<cpp11::decay_t<doubles>>(pi_hat_test), cpp11::as_cpp<cpp11::decay_t<int>>(n_burnin), cpp11::as_cpp<cpp11::decay_t<int>>(n_samples), cpp11::as_cpp<cpp11::decay_t<int>>(seed), cpp11::as_cpp<cpp11::decay_t<list>>(mu_config), cpp11::as_cpp<cpp11::decay_t<list>>(tau_config)));
+  END_CPP11
+}
+// bindings.cpp
+external_pointer<bart::BCFModel> fit_xbcf_cpp(doubles_matrix<> X, doubles y, doubles z, doubles pi_hat, doubles_matrix<> X_test, doubles pi_hat_test, int n_burnin, int n_samples, int seed, list mu_config, list tau_config);
+extern "C" SEXP _faststochtree_fit_xbcf_cpp(SEXP X, SEXP y, SEXP z, SEXP pi_hat, SEXP X_test, SEXP pi_hat_test, SEXP n_burnin, SEXP n_samples, SEXP seed, SEXP mu_config, SEXP tau_config) {
+  BEGIN_CPP11
+    return cpp11::as_sexp(fit_xbcf_cpp(cpp11::as_cpp<cpp11::decay_t<doubles_matrix<>>>(X), cpp11::as_cpp<cpp11::decay_t<doubles>>(y), cpp11::as_cpp<cpp11::decay_t<doubles>>(z), cpp11::as_cpp<cpp11::decay_t<doubles>>(pi_hat), cpp11::as_cpp<cpp11::decay_t<doubles_matrix<>>>(X_test), cpp11::as_cpp<cpp11::decay_t<doubles>>(pi_hat_test), cpp11::as_cpp<cpp11::decay_t<int>>(n_burnin), cpp11::as_cpp<cpp11::decay_t<int>>(n_samples), cpp11::as_cpp<cpp11::decay_t<int>>(seed), cpp11::as_cpp<cpp11::decay_t<list>>(mu_config), cpp11::as_cpp<cpp11::decay_t<list>>(tau_config)));
+  END_CPP11
+}
+// bindings.cpp
+external_pointer<bart::BCFModel> fit_warmstart_bcf_cpp(doubles_matrix<> X, doubles y, doubles z, doubles pi_hat, doubles_matrix<> X_test, doubles pi_hat_test, int n_gfr_burnin, int n_mcmc_burnin, int n_samples, int seed, bool keep_gfr_samples, list mu_config, list tau_config);
+extern "C" SEXP _faststochtree_fit_warmstart_bcf_cpp(SEXP X, SEXP y, SEXP z, SEXP pi_hat, SEXP X_test, SEXP pi_hat_test, SEXP n_gfr_burnin, SEXP n_mcmc_burnin, SEXP n_samples, SEXP seed, SEXP keep_gfr_samples, SEXP mu_config, SEXP tau_config) {
+  BEGIN_CPP11
+    return cpp11::as_sexp(fit_warmstart_bcf_cpp(cpp11::as_cpp<cpp11::decay_t<doubles_matrix<>>>(X), cpp11::as_cpp<cpp11::decay_t<doubles>>(y), cpp11::as_cpp<cpp11::decay_t<doubles>>(z), cpp11::as_cpp<cpp11::decay_t<doubles>>(pi_hat), cpp11::as_cpp<cpp11::decay_t<doubles_matrix<>>>(X_test), cpp11::as_cpp<cpp11::decay_t<doubles>>(pi_hat_test), cpp11::as_cpp<cpp11::decay_t<int>>(n_gfr_burnin), cpp11::as_cpp<cpp11::decay_t<int>>(n_mcmc_burnin), cpp11::as_cpp<cpp11::decay_t<int>>(n_samples), cpp11::as_cpp<cpp11::decay_t<int>>(seed), cpp11::as_cpp<cpp11::decay_t<bool>>(keep_gfr_samples), cpp11::as_cpp<cpp11::decay_t<list>>(mu_config), cpp11::as_cpp<cpp11::decay_t<list>>(tau_config)));
+  END_CPP11
+}
+// bindings.cpp
+doubles_matrix<> predict_tau_cpp(external_pointer<bart::BCFModel> model, doubles_matrix<> X_new);
+extern "C" SEXP _faststochtree_predict_tau_cpp(SEXP model, SEXP X_new) {
+  BEGIN_CPP11
+    return cpp11::as_sexp(predict_tau_cpp(cpp11::as_cpp<cpp11::decay_t<external_pointer<bart::BCFModel>>>(model), cpp11::as_cpp<cpp11::decay_t<doubles_matrix<>>>(X_new)));
+  END_CPP11
+}
+// bindings.cpp
+doubles_matrix<> predict_mu_cpp(external_pointer<bart::BCFModel> model, doubles_matrix<> X_new_mu);
+extern "C" SEXP _faststochtree_predict_mu_cpp(SEXP model, SEXP X_new_mu) {
+  BEGIN_CPP11
+    return cpp11::as_sexp(predict_mu_cpp(cpp11::as_cpp<cpp11::decay_t<external_pointer<bart::BCFModel>>>(model), cpp11::as_cpp<cpp11::decay_t<doubles_matrix<>>>(X_new_mu)));
+  END_CPP11
+}
+// bindings.cpp
+doubles_matrix<> test_tau_samples_cpp(external_pointer<bart::BCFModel> model);
+extern "C" SEXP _faststochtree_test_tau_samples_cpp(SEXP model) {
+  BEGIN_CPP11
+    return cpp11::as_sexp(test_tau_samples_cpp(cpp11::as_cpp<cpp11::decay_t<external_pointer<bart::BCFModel>>>(model)));
+  END_CPP11
+}
+// bindings.cpp
+doubles_matrix<> test_mu_samples_cpp(external_pointer<bart::BCFModel> model);
+extern "C" SEXP _faststochtree_test_mu_samples_cpp(SEXP model) {
+  BEGIN_CPP11
+    return cpp11::as_sexp(test_mu_samples_cpp(cpp11::as_cpp<cpp11::decay_t<external_pointer<bart::BCFModel>>>(model)));
+  END_CPP11
+}
+// bindings.cpp
+doubles sigma2_bcf_samples_cpp(external_pointer<bart::BCFModel> model);
+extern "C" SEXP _faststochtree_sigma2_bcf_samples_cpp(SEXP model) {
+  BEGIN_CPP11
+    return cpp11::as_sexp(sigma2_bcf_samples_cpp(cpp11::as_cpp<cpp11::decay_t<external_pointer<bart::BCFModel>>>(model)));
+  END_CPP11
+}
 
 extern "C" {
 static const R_CallMethodDef CallEntries[] = {
@@ -56,6 +112,14 @@ static const R_CallMethodDef CallEntries[] = {
     {"_faststochtree_predict_cpp",            (DL_FUNC) &_faststochtree_predict_cpp,            2},
     {"_faststochtree_sigma2_samples_cpp",     (DL_FUNC) &_faststochtree_sigma2_samples_cpp,     1},
     {"_faststochtree_test_samples_cpp",       (DL_FUNC) &_faststochtree_test_samples_cpp,       1},
+    {"_faststochtree_fit_bcf_cpp",            (DL_FUNC) &_faststochtree_fit_bcf_cpp,            11},
+    {"_faststochtree_fit_xbcf_cpp",           (DL_FUNC) &_faststochtree_fit_xbcf_cpp,           11},
+    {"_faststochtree_fit_warmstart_bcf_cpp",  (DL_FUNC) &_faststochtree_fit_warmstart_bcf_cpp,  13},
+    {"_faststochtree_predict_tau_cpp",        (DL_FUNC) &_faststochtree_predict_tau_cpp,        2},
+    {"_faststochtree_predict_mu_cpp",         (DL_FUNC) &_faststochtree_predict_mu_cpp,         2},
+    {"_faststochtree_test_tau_samples_cpp",   (DL_FUNC) &_faststochtree_test_tau_samples_cpp,   1},
+    {"_faststochtree_test_mu_samples_cpp",    (DL_FUNC) &_faststochtree_test_mu_samples_cpp,    1},
+    {"_faststochtree_sigma2_bcf_samples_cpp", (DL_FUNC) &_faststochtree_sigma2_bcf_samples_cpp, 1},
     {NULL, NULL, 0}
 };
 }

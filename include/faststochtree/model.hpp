@@ -59,20 +59,22 @@ struct GFRHistWorkspace {
     struct LeafSeg { int node, beg, end; };
     std::vector<LeafSeg> leaf_segs;
 
-    std::vector<float>   sum_hists;       // [m_max * 256]: fi*256 + bin
-    std::vector<int>     cnt_hists;       // [m_max * 256]
+    std::vector<float>   sum_hists;       // [m_max * 256]: s_wyx per bin
+    std::vector<int>     cnt_hists;       // [m_max * 256]: total obs per bin (always)
+    std::vector<float>   zwt_hists;       // [m_max * 256]: s_wxx per bin (regression leaf only)
     std::vector<float>   feat_log_total;  // [m_max + 1]
     std::vector<float>   cut_log_wts;     // stage-2 candidate log-weights (≤255)
     std::vector<uint8_t> cut_thresh_buf;  // stage-2 candidate thresholds  (≤255)
     std::vector<int>     right_buf;       // partition scratch
     std::vector<int>     feat_order;      // [p] Fisher-Yates scratch
 
-    void alloc(int n, int p, int full_size) {
+    void alloc(int n, int p, int full_size, bool has_z = false) {
         flat_obs.resize(n);
         node_range.assign(full_size + 1, {-1, -1});
         leaf_segs.reserve(full_size / 2 + 1);
         sum_hists.resize(p * 256);
         cnt_hists.resize(p * 256);
+        if (has_z) zwt_hists.resize(p * 256, 0.f);
         feat_log_total.resize(p + 1);
         cut_log_wts.reserve(255);
         cut_thresh_buf.reserve(255);
@@ -106,9 +108,10 @@ struct BARTState {
     std::unique_ptr<ThreadPool>     thread_pool;     // optional; built by run_xbart for num_threads>1
 };
 
-// Reduced log marginal likelihood for a Gaussian constant leaf.
-// Cancels terms that are equal between split and no-split comparisons.
-inline float leaf_log_ml(float sum_y, int n, float sigma2, float tau) {
+// Reduced log marginal likelihood for a Gaussian leaf.
+// For constant leaf (ω=1): pass sum_y = Σ r_i, n = obs count.
+// For regression leaf (ω=z_i): pass sum_y = Σ r_i·z_i (s_wyx), n = Σ z_i (s_wxx).
+inline float leaf_log_ml(float sum_y, float n, float sigma2, float tau) {
     return -0.5f * std::log(1.0f + tau * n / sigma2)
            + (tau * sum_y * sum_y) / (2.0f * sigma2 * (n * tau + sigma2));
 }
@@ -124,5 +127,12 @@ void sample_sigma2(const float* resid, int n, float& sigma2,
 void sample_leaves(Tree& tree, const float* resid, const float* pred_off,
                    int n, float sigma2, const BARTConfig& cfg, RNG& rng,
                    const std::vector<int>& leaf_idx, Workspace& ws);
+
+// BCF uses two forests with independent hyperparameters.
+// sigma2 is shared; its prior is drawn from mu_config.
+struct BCFConfig {
+    BARTConfig mu_config;   // prognostic forest μ(x, ê(x))
+    BARTConfig tau_config;  // treatment-effect forest τ(x), regression leaf on z
+};
 
 } // namespace bart

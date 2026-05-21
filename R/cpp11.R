@@ -23,3 +23,35 @@ test_samples_cpp <- function(model) {
 sigma2_samples_cpp <- function(model) {
   .Call(`_faststochtree_sigma2_samples_cpp`, model)
 }
+
+fit_bcf_cpp <- function(X, y, z, pi_hat, X_test, pi_hat_test, n_burnin, n_samples, seed, mu_config, tau_config) {
+  .Call(`_faststochtree_fit_bcf_cpp`, X, y, z, pi_hat, X_test, pi_hat_test, n_burnin, n_samples, seed, mu_config, tau_config)
+}
+
+fit_xbcf_cpp <- function(X, y, z, pi_hat, X_test, pi_hat_test, n_burnin, n_samples, seed, mu_config, tau_config) {
+  .Call(`_faststochtree_fit_xbcf_cpp`, X, y, z, pi_hat, X_test, pi_hat_test, n_burnin, n_samples, seed, mu_config, tau_config)
+}
+
+fit_warmstart_bcf_cpp <- function(X, y, z, pi_hat, X_test, pi_hat_test, n_gfr_burnin, n_mcmc_burnin, n_samples, seed, keep_gfr_samples, mu_config, tau_config) {
+  .Call(`_faststochtree_fit_warmstart_bcf_cpp`, X, y, z, pi_hat, X_test, pi_hat_test, n_gfr_burnin, n_mcmc_burnin, n_samples, seed, keep_gfr_samples, mu_config, tau_config)
+}
+
+predict_tau_cpp <- function(model, X_new) {
+  .Call(`_faststochtree_predict_tau_cpp`, model, X_new)
+}
+
+predict_mu_cpp <- function(model, X_new_mu) {
+  .Call(`_faststochtree_predict_mu_cpp`, model, X_new_mu)
+}
+
+test_tau_samples_cpp <- function(model) {
+  .Call(`_faststochtree_test_tau_samples_cpp`, model)
+}
+
+test_mu_samples_cpp <- function(model) {
+  .Call(`_faststochtree_test_mu_samples_cpp`, model)
+}
+
+sigma2_bcf_samples_cpp <- function(model) {
+  .Call(`_faststochtree_sigma2_bcf_samples_cpp`, model)
+}

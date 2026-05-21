@@ -1,4 +1,5 @@
 #include "faststochtree/gfr.hpp"
+#include "faststochtree/mcmc.hpp"
 #include <algorithm>
 #include <cmath>
 #include <climits>
@@ -60,7 +61,7 @@ namespace bart {
 
 void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
                    int n, int p, float sigma2, const BARTConfig& cfg, RNG& rng,
-                   GFRHistWorkspace& ws, ThreadPool* pool) {
+                   GFRHistWorkspace& ws, ThreadPool* pool, const float* z) {
     tree.reset();
     ws.reinit(n);
 
@@ -88,9 +89,20 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
                 continue;
             }
 
-            // Compute total residual sum for this node
-            float sum_T = 0.f;
-            for (int k = beg; k < end; k++) sum_T += resid[ws.flat_obs[k]];
+            // Compute total residual sum (z-weighted when z != nullptr).
+            // count_T = total obs (always); used for min_samples_leaf and partition.
+            // sum_T / zwt_T = s_wyx / s_wxx for the marginal likelihood.
+            float sum_T = 0.f, zwt_T = 0.f;
+            if (z) {
+                for (int k = beg; k < end; k++) {
+                    int obs = ws.flat_obs[k];
+                    float zv = z[obs];
+                    sum_T += resid[obs] * zv;
+                    zwt_T += zv;
+                }
+            } else {
+                for (int k = beg; k < end; k++) sum_T += resid[ws.flat_obs[k]];
+            }
             int count_T = n_k;
 
             // Fisher-Yates shuffle first m of feat_order
@@ -117,17 +129,20 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
             // ---------------------------------------------------------------
             auto hist_build = [&](int fi) {
                 int j = ws.feat_order[fi];
-                float* sh = ws.sum_hists.data() + fi * 256;
-                int*   ch = ws.cnt_hists.data() + fi * 256;
+                float* sh  = ws.sum_hists.data() + fi * 256;
+                int*   ch  = ws.cnt_hists.data() + fi * 256;
+                float* zwh = z ? (ws.zwt_hists.data() + fi * 256) : nullptr;
                 std::fill(sh, sh + 256, 0.f);
                 std::fill(ch, ch + 256, 0);
+                if (zwh) std::fill(zwh, zwh + 256, 0.f);
 
-                // Build histogram over obs in [beg, end)
-                // Prefetch + 4x unroll to hide indirect-load latency.
-                // Gate on n_k: below ~128 obs the overhead isn't worth it.
+                // Build histogram over obs in [beg, end).
+                // For regression leaf (z != nullptr): sh accumulates s_wyx, zwh s_wxx.
+                // ch always counts total obs (used for min_samples_leaf check).
+                // Prefetch + 4x unroll only for constant-leaf path.
                 constexpr int PF = 12;
                 int hk = beg;
-                if (n_k >= 128) {
+                if (!z && n_k >= 128) {
                     const uint8_t* col = Xq.data.data() + j * Xq.n;
                     for (; hk + 3 < end; hk += 4) {
                         #ifdef __GNUC__
@@ -144,6 +159,7 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
                         #endif
                         int o0 = ws.flat_obs[hk],   o1 = ws.flat_obs[hk+1];
                         int o2 = ws.flat_obs[hk+2], o3 = ws.flat_obs[hk+3];
+                        const uint8_t* col = Xq.data.data() + j * Xq.n;
                         uint8_t b0 = col[o0], b1 = col[o1];
                         uint8_t b2 = col[o2], b3 = col[o3];
                         sh[b0] += resid[o0]; ch[b0]++;
@@ -152,23 +168,39 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
                         sh[b3] += resid[o3]; ch[b3]++;
                     }
                 }
-                for (; hk < end; hk++) {
-                    int obs = ws.flat_obs[hk];
-                    uint8_t bin = Xq.at(obs, j);
-                    sh[bin] += resid[obs];
-                    ch[bin]++;
+                if (z) {
+                    for (; hk < end; hk++) {
+                        int obs = ws.flat_obs[hk];
+                        uint8_t bin = Xq.at(obs, j);
+                        float zv = z[obs];
+                        sh[bin]  += resid[obs] * zv;
+                        zwh[bin] += zv;
+                        ch[bin]++;
+                    }
+                } else {
+                    for (; hk < end; hk++) {
+                        int obs = ws.flat_obs[hk];
+                        uint8_t bin = Xq.at(obs, j);
+                        sh[bin] += resid[obs];
+                        ch[bin]++;
+                    }
                 }
 
-                // Prefix scan: online LSE over valid split points
-                float sum_L = 0.f; int count_L = 0;
+                // Prefix scan: online LSE over valid split points.
+                // count_L / count_R = total obs (min_samples_leaf check).
+                // suf_L / suf_R = z-weighted counts (s_wxx) for marginal likelihood.
+                float sum_L = 0.f, zwt_L = 0.f; int count_L = 0;
                 float max_lw = NEG_INF, sum_exp = 0.f;
                 for (int b = 0; b < 255; b++) {
                     if (ch[b] == 0) continue;
-                    sum_L += sh[b]; count_L += ch[b];
+                    sum_L   += sh[b]; count_L += ch[b];
+                    if (zwh) zwt_L += zwh[b];
                     int count_R = count_T - count_L;
                     if (count_L < cfg.min_samples_leaf || count_R < cfg.min_samples_leaf) continue;
-                    float log_ml = leaf_log_ml(sum_L, count_L, sigma2, cfg.leaf_prior_var)
-                                 + leaf_log_ml(sum_T - sum_L, count_R, sigma2, cfg.leaf_prior_var);
+                    float suf_L = z ? zwt_L            : (float)count_L;
+                    float suf_R = z ? (zwt_T - zwt_L)  : (float)count_R;
+                    float log_ml = leaf_log_ml(sum_L, suf_L, sigma2, cfg.leaf_prior_var)
+                                 + leaf_log_ml(sum_T - sum_L, suf_R, sigma2, cfg.leaf_prior_var);
                     if (log_ml > max_lw) { sum_exp = sum_exp * std::exp(max_lw - log_ml) + 1.f; max_lw = log_ml; }
                     else sum_exp += std::exp(log_ml - max_lw);
                 }
@@ -186,7 +218,8 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
             for (int fi = 0; fi < m; fi++)
                 if (ws.feat_log_total[fi] > NEG_INF) n_valid_feats++;
 
-            ws.feat_log_total[m] = leaf_log_ml(sum_T, count_T, sigma2, cfg.leaf_prior_var)
+            float suf_T = z ? zwt_T : (float)count_T;
+            ws.feat_log_total[m] = leaf_log_ml(sum_T, suf_T, sigma2, cfg.leaf_prior_var)
                                   - log_split_ratio
                                   + (n_valid_feats > 0 ? std::log((float)n_valid_feats) : 0.f);
 
@@ -213,16 +246,20 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
             ws.cut_log_wts.clear();
             ws.cut_thresh_buf.clear();
             {
-                float* sh = ws.sum_hists.data() + chosen_fi * 256;
-                int*   ch = ws.cnt_hists.data() + chosen_fi * 256;
-                float sum_L = 0.f; int count_L = 0;
+                float* sh  = ws.sum_hists.data() + chosen_fi * 256;
+                int*   ch  = ws.cnt_hists.data() + chosen_fi * 256;
+                float* zwh = z ? (ws.zwt_hists.data() + chosen_fi * 256) : nullptr;
+                float sum_L = 0.f, zwt_L = 0.f; int count_L = 0;
                 for (int b = 0; b < 255; b++) {
                     if (ch[b] == 0) continue;
-                    sum_L += sh[b]; count_L += ch[b];
+                    sum_L   += sh[b]; count_L += ch[b];
+                    if (zwh) zwt_L += zwh[b];
                     int count_R = count_T - count_L;
                     if (count_L < cfg.min_samples_leaf || count_R < cfg.min_samples_leaf) continue;
-                    float log_ml = leaf_log_ml(sum_L, count_L, sigma2, cfg.leaf_prior_var)
-                                 + leaf_log_ml(sum_T - sum_L, count_R, sigma2, cfg.leaf_prior_var);
+                    float suf_L = z ? zwt_L           : (float)count_L;
+                    float suf_R = z ? (zwt_T - zwt_L) : (float)count_R;
+                    float log_ml = leaf_log_ml(sum_L, suf_L, sigma2, cfg.leaf_prior_var)
+                                 + leaf_log_ml(sum_T - sum_L, suf_R, sigma2, cfg.leaf_prior_var);
                     ws.cut_log_wts.push_back(log_ml);
                     ws.cut_thresh_buf.push_back((uint8_t)b);
                 }
@@ -325,6 +362,22 @@ void grow_tree_gfr(Tree& tree, const QuantizedX& Xq, const float* resid,
 // gfr_sweep
 // -----------------------------------------------------------------------
 
+// Copy GFR workspace leaf partition into BARTState arrays for tree t.
+static void rebuild_leaf_state(BARTState& s, int t, int n) {
+    auto& ws = s.gfr_hist_ws;
+    std::copy(ws.flat_obs.begin(), ws.flat_obs.begin() + n, s.flat_obs[t].begin());
+    std::fill(s.leaf_counts[t].begin(), s.leaf_counts[t].end(), 0);
+    for (auto& seg : ws.leaf_segs) {
+        s.leaf_counts[t][seg.node] = seg.end - seg.beg;
+        for (int idx = seg.beg; idx < seg.end; idx++)
+            s.leaf_indices[t][s.flat_obs[t][idx]] = seg.node;
+    }
+    // Set leaf_start from GFR partition positions (not a prefix sum —
+    // GFR lays out flat_obs in BFS order, not node-index order).
+    std::fill(s.leaf_start[t].begin(), s.leaf_start[t].end(), 0);
+    for (auto& seg : ws.leaf_segs) s.leaf_start[t][seg.node] = seg.beg;
+}
+
 void gfr_sweep(BARTState& state, const BARTConfig& cfg, RNG& rng) {
     int T = cfg.num_trees, n = state.n;
 
@@ -336,35 +389,7 @@ void gfr_sweep(BARTState& state, const BARTConfig& cfg, RNG& rng) {
                       state.gfr_hist_ws, state.thread_pool.get());
 
         // Rebuild leaf state from GFR workspace — no re-traversal needed.
-        // grow_tree_gfr populated ws.leaf_segs with (node, beg, end) for
-        // each leaf; ws.flat_obs is already partitioned in matching order.
-        auto& ws = state.gfr_hist_ws;
-        auto& lc = state.leaf_counts[t];
-        auto& fo = state.flat_obs[t];
-        auto& ls = state.leaf_start[t];
-        auto& li = state.leaf_indices[t];
-        int full_size = state.trees[t].full_size;
-
-        // Step 1: copy partitioned obs list from workspace
-        std::copy(ws.flat_obs.begin(), ws.flat_obs.begin() + n, fo.begin());
-
-        // Step 2: derive lc and li from leaf_segs (O(n) scattered write,
-        // no tree traversal)
-        std::fill(lc.begin(), lc.end(), 0);
-        for (auto& seg : ws.leaf_segs) {
-            lc[seg.node] = seg.end - seg.beg;
-            for (int idx = seg.beg; idx < seg.end; idx++)
-                li[fo[idx]] = seg.node;
-        }
-
-        // Step 3: set leaf_start directly from the GFR partition positions.
-        // A sequential prefix sum over node indices would be wrong: GFR lays out
-        // flat_obs in BFS traversal order, not node-index order, so for any tree
-        // deeper than one level the two orderings diverge and MCMC proposals
-        // (propose_grow / propose_prune) would read out of bounds.
-        std::fill(ls.begin(), ls.end(), 0);
-        for (auto& seg : ws.leaf_segs)
-            ls[seg.node] = seg.beg;
+        rebuild_leaf_state(state, t, n);
 
         // zeros as pred_off: residual already fully restored above
         sample_leaves(state.trees[t], state.residual.data(), state.ws.zeros.data(),
@@ -375,6 +400,58 @@ void gfr_sweep(BARTState& state, const BARTConfig& cfg, RNG& rng) {
         for (int i = 0; i < n; i++) state.residual[i] -= state.pred[t][i];
     }
     sample_sigma2(state.residual.data(), n, state.sigma2, cfg, rng);
+}
+
+// ── BCF GFR sweep ─────────────────────────────────────────────────────────────
+
+void bcf_gfr_sweep(std::vector<float>& shared_resid, const float* z,
+                   BARTState& mu_s, const BARTConfig& mu_cfg,
+                   BARTState& tau_s, const BARTConfig& tau_cfg,
+                   float& sigma2, RNG& rng) {
+    int n = mu_s.n;
+
+    // --- μ forest: constant leaf ---
+    for (int t = 0; t < mu_cfg.num_trees; t++) {
+        for (int i = 0; i < n; i++) shared_resid[i] += mu_s.pred[t][i];
+
+        grow_tree_gfr(mu_s.trees[t], mu_s.Xq, shared_resid.data(),
+                      n, mu_s.p, sigma2, mu_cfg, rng,
+                      mu_s.gfr_hist_ws, mu_s.thread_pool.get());
+
+        rebuild_leaf_state(mu_s, t, n);
+
+        sample_leaves(mu_s.trees[t], shared_resid.data(), mu_s.ws.zeros.data(),
+                      n, sigma2, mu_cfg, rng, mu_s.leaf_indices[t], mu_s.ws);
+
+        for (int i = 0; i < n; i++) {
+            mu_s.pred[t][i]  = mu_s.trees[t].leaf_value[mu_s.leaf_indices[t][i]];
+            shared_resid[i] -= mu_s.pred[t][i];
+        }
+    }
+
+    // --- τ forest: regression leaf on z ---
+    for (int t = 0; t < tau_cfg.num_trees; t++) {
+        for (int i = 0; i < n; i++) shared_resid[i] += tau_s.pred[t][i];
+
+        grow_tree_gfr(tau_s.trees[t], tau_s.Xq, shared_resid.data(),
+                      n, tau_s.p, sigma2, tau_cfg, rng,
+                      tau_s.gfr_hist_ws, tau_s.thread_pool.get(), z);
+
+        rebuild_leaf_state(tau_s, t, n);
+
+        sample_leaves_regression(tau_s.trees[t], shared_resid.data(), tau_s.ws.zeros.data(),
+                                  z, n, sigma2, tau_cfg, rng,
+                                  tau_s.leaf_indices[t], tau_s.ws);
+
+        for (int i = 0; i < n; i++) {
+            float beta      = tau_s.trees[t].leaf_value[tau_s.leaf_indices[t][i]];
+            tau_s.pred[t][i] = beta * z[i];
+            shared_resid[i] -= tau_s.pred[t][i];
+        }
+    }
+
+    sample_sigma2(shared_resid.data(), n, sigma2, mu_cfg, rng);
+    mu_s.sigma2 = tau_s.sigma2 = sigma2;
 }
 
 } // namespace bart

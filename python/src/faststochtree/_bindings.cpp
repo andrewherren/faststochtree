@@ -155,4 +155,161 @@ PYBIND11_MODULE(_faststochtree, m) {
         py::arg("n_burnin") = 15, py::arg("n_samples") = 25,
         py::arg("seed") = 42,
         py::arg("config") = bart::BARTConfig{});
+
+    // ── BCFConfig ─────────────────────────────────────────────────────────────
+    py::class_<bart::BCFConfig>(m, "BCFConfig")
+        .def(py::init<>())
+        .def_readwrite("mu_config",  &bart::BCFConfig::mu_config)
+        .def_readwrite("tau_config", &bart::BCFConfig::tau_config);
+
+    // ── BCFModel ──────────────────────────────────────────────────────────────
+    py::class_<bart::BCFModel>(m, "BCFModel")
+        .def_readonly("n_samples", &bart::BCFModel::n_samples)
+        .def_readonly("n_test",    &bart::BCFModel::n_test)
+        .def_property_readonly("sigma2_samples", [](const bart::BCFModel& self) {
+            return py::array_t<float>(
+                {(py::ssize_t)self.n_samples},
+                self.sigma2_samples.data());
+        })
+        .def_property_readonly("test_tau", [](const bart::BCFModel& self) {
+            if (self.n_test == 0)
+                return py::array_t<float>(std::vector<py::ssize_t>{0, 0});
+            return py::array_t<float>(
+                {(py::ssize_t)self.n_samples, (py::ssize_t)self.n_test},
+                self.test_tau.data());
+        })
+        .def_property_readonly("test_mu", [](const bart::BCFModel& self) {
+            if (self.n_test == 0)
+                return py::array_t<float>(std::vector<py::ssize_t>{0, 0});
+            return py::array_t<float>(
+                {(py::ssize_t)self.n_samples, (py::ssize_t)self.n_test},
+                self.test_mu.data());
+        })
+        .def("predict_tau", [](const bart::BCFModel& self, py::array X_new_raw) {
+            auto [X_arr, X_ptr] = to_float32_rowmajor(X_new_raw);
+            auto buf = X_arr.request();
+            if (buf.ndim != 2) throw std::invalid_argument("X_new must be 2-D");
+            int n_new = static_cast<int>(buf.shape[0]);
+            std::vector<float> out = self.predict_tau(X_ptr, n_new);
+            return py::array_t<float>(
+                {(py::ssize_t)self.n_samples, (py::ssize_t)n_new}, out.data());
+        }, py::arg("X_new"))
+        .def("predict_mu", [](const bart::BCFModel& self, py::array X_new_mu_raw) {
+            auto [X_arr, X_ptr] = to_float32_rowmajor(X_new_mu_raw);
+            auto buf = X_arr.request();
+            if (buf.ndim != 2) throw std::invalid_argument("X_new_mu must be 2-D");
+            int n_new = static_cast<int>(buf.shape[0]);
+            std::vector<float> out = self.predict_mu(X_ptr, n_new);
+            return py::array_t<float>(
+                {(py::ssize_t)self.n_samples, (py::ssize_t)n_new}, out.data());
+        }, py::arg("X_new_mu"));
+
+    // ── fit_bcf ───────────────────────────────────────────────────────────────
+    m.def("fit_bcf",
+        [](py::array X_raw, py::array_t<float> y_raw,
+           py::array_t<float> z_raw, py::array_t<float> pi_hat_raw,
+           py::array X_test_raw, py::array_t<float> pi_hat_test_raw,
+           int n_burnin, int n_samples, int seed,
+           const bart::BCFConfig& cfg) {
+
+            auto [X_arr,  X_ptr]  = to_float32_rowmajor(X_raw);
+            auto [Xt_arr, Xt_ptr] = to_float32_rowmajor(X_test_raw);
+            auto y_arr       = py::array_t<float, py::array::c_style | py::array::forcecast>(y_raw);
+            auto z_arr       = py::array_t<float, py::array::c_style | py::array::forcecast>(z_raw);
+            auto pi_arr      = py::array_t<float, py::array::c_style | py::array::forcecast>(pi_hat_raw);
+            auto pi_test_arr = py::array_t<float, py::array::c_style | py::array::forcecast>(pi_hat_test_raw);
+
+            auto Xbuf  = X_arr.request();
+            auto Xtbuf = Xt_arr.request();
+            if (Xbuf.ndim != 2)  throw std::invalid_argument("X must be 2-D");
+            if (Xtbuf.ndim != 2) throw std::invalid_argument("X_test must be 2-D");
+
+            int n      = static_cast<int>(Xbuf.shape[0]);
+            int p      = static_cast<int>(Xbuf.shape[1]);
+            int n_test = static_cast<int>(Xtbuf.shape[0]);
+
+            return std::make_unique<bart::BCFModel>(
+                bart::fit_bcf(X_ptr, y_arr.data(), z_arr.data(), pi_arr.data(), n, p,
+                              Xt_ptr, pi_test_arr.data(), n_test,
+                              cfg, n_burnin, n_samples, seed));
+        },
+        py::arg("X"), py::arg("y"), py::arg("z"), py::arg("pi_hat"),
+        py::arg("X_test"), py::arg("pi_hat_test"),
+        py::arg("n_burnin") = 200, py::arg("n_samples") = 1000,
+        py::arg("seed") = 42,
+        py::arg("config") = bart::BCFConfig{});
+
+    // ── fit_xbcf ──────────────────────────────────────────────────────────────
+    m.def("fit_xbcf",
+        [](py::array X_raw, py::array_t<float> y_raw,
+           py::array_t<float> z_raw, py::array_t<float> pi_hat_raw,
+           py::array X_test_raw, py::array_t<float> pi_hat_test_raw,
+           int n_burnin, int n_samples, int seed,
+           const bart::BCFConfig& cfg) {
+
+            auto [X_arr,  X_ptr]  = to_float32_rowmajor(X_raw);
+            auto [Xt_arr, Xt_ptr] = to_float32_rowmajor(X_test_raw);
+            auto y_arr       = py::array_t<float, py::array::c_style | py::array::forcecast>(y_raw);
+            auto z_arr       = py::array_t<float, py::array::c_style | py::array::forcecast>(z_raw);
+            auto pi_arr      = py::array_t<float, py::array::c_style | py::array::forcecast>(pi_hat_raw);
+            auto pi_test_arr = py::array_t<float, py::array::c_style | py::array::forcecast>(pi_hat_test_raw);
+
+            auto Xbuf  = X_arr.request();
+            auto Xtbuf = Xt_arr.request();
+            if (Xbuf.ndim != 2)  throw std::invalid_argument("X must be 2-D");
+            if (Xtbuf.ndim != 2) throw std::invalid_argument("X_test must be 2-D");
+
+            int n      = static_cast<int>(Xbuf.shape[0]);
+            int p      = static_cast<int>(Xbuf.shape[1]);
+            int n_test = static_cast<int>(Xtbuf.shape[0]);
+
+            return std::make_unique<bart::BCFModel>(
+                bart::fit_xbcf(X_ptr, y_arr.data(), z_arr.data(), pi_arr.data(), n, p,
+                               Xt_ptr, pi_test_arr.data(), n_test,
+                               cfg, n_burnin, n_samples, seed));
+        },
+        py::arg("X"), py::arg("y"), py::arg("z"), py::arg("pi_hat"),
+        py::arg("X_test"), py::arg("pi_hat_test"),
+        py::arg("n_burnin") = 15, py::arg("n_samples") = 25,
+        py::arg("seed") = 42,
+        py::arg("config") = bart::BCFConfig{});
+
+    // ── fit_warmstart_bcf ─────────────────────────────────────────────────────
+    m.def("fit_warmstart_bcf",
+        [](py::array X_raw, py::array_t<float> y_raw,
+           py::array_t<float> z_raw, py::array_t<float> pi_hat_raw,
+           py::array X_test_raw, py::array_t<float> pi_hat_test_raw,
+           int n_gfr_burnin, int n_mcmc_burnin, int n_samples, int seed,
+           bool keep_gfr_samples,
+           const bart::BCFConfig& cfg) {
+
+            auto [X_arr,  X_ptr]  = to_float32_rowmajor(X_raw);
+            auto [Xt_arr, Xt_ptr] = to_float32_rowmajor(X_test_raw);
+            auto y_arr       = py::array_t<float, py::array::c_style | py::array::forcecast>(y_raw);
+            auto z_arr       = py::array_t<float, py::array::c_style | py::array::forcecast>(z_raw);
+            auto pi_arr      = py::array_t<float, py::array::c_style | py::array::forcecast>(pi_hat_raw);
+            auto pi_test_arr = py::array_t<float, py::array::c_style | py::array::forcecast>(pi_hat_test_raw);
+
+            auto Xbuf  = X_arr.request();
+            auto Xtbuf = Xt_arr.request();
+            if (Xbuf.ndim != 2)  throw std::invalid_argument("X must be 2-D");
+            if (Xtbuf.ndim != 2) throw std::invalid_argument("X_test must be 2-D");
+
+            int n      = static_cast<int>(Xbuf.shape[0]);
+            int p      = static_cast<int>(Xbuf.shape[1]);
+            int n_test = static_cast<int>(Xtbuf.shape[0]);
+
+            return std::make_unique<bart::BCFModel>(
+                bart::fit_warmstart_bcf(X_ptr, y_arr.data(), z_arr.data(), pi_arr.data(), n, p,
+                                        Xt_ptr, pi_test_arr.data(), n_test,
+                                        cfg, n_gfr_burnin, n_mcmc_burnin, n_samples,
+                                        seed, keep_gfr_samples));
+        },
+        py::arg("X"), py::arg("y"), py::arg("z"), py::arg("pi_hat"),
+        py::arg("X_test"), py::arg("pi_hat_test"),
+        py::arg("n_gfr_burnin") = 20, py::arg("n_mcmc_burnin") = 0,
+        py::arg("n_samples") = 200,
+        py::arg("seed") = 42,
+        py::arg("keep_gfr_samples") = false,
+        py::arg("config") = bart::BCFConfig{});
 }

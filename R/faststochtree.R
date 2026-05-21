@@ -151,3 +151,160 @@ test_samples <- function(model) {
 sigma2_samples <- function(model) {
   sigma2_samples_cpp(model$ptr) * model$y_sd^2
 }
+
+# ── BCF ───────────────────────────────────────────────────────────────────────
+
+#' Create a BCFConfig list
+#'
+#' @param mu_config  Named list from bart_config() for the prognostic forest
+#' @param tau_config Named list from bart_config() for the treatment-effect forest
+#' @return A named list suitable for passing to fit_bcf() and related functions
+#' @export
+bcf_config <- function(mu_config  = bart_config(),
+                       tau_config = bart_config(num_trees = 50L)) {
+  list(mu = mu_config, tau = tau_config)
+}
+
+.scale_bcf_config <- function(config) {
+  if (config$mu$leaf_prior_var  < 0) config$mu$leaf_prior_var  <- 1.0 / config$mu$num_trees
+  if (config$tau$leaf_prior_var < 0) config$tau$leaf_prior_var <- 1.0 / config$tau$num_trees
+  config
+}
+
+#' Fit a BCF model via MCMC
+#'
+#' @param X           Numeric matrix [n x p] of training covariates
+#' @param y           Numeric vector [n] of training responses
+#' @param z           Numeric vector [n] of binary treatment indicators (0/1)
+#' @param pi_hat      Numeric vector [n] of estimated propensity scores
+#' @param X_test      Numeric matrix [n_test x p] of test covariates
+#' @param pi_hat_test Numeric vector [n_test] of test propensity scores
+#' @param n_burnin    Number of MCMC burn-in sweeps (default 200)
+#' @param n_samples   Number of posterior samples (default 1000)
+#' @param seed        Integer random seed (default 42)
+#' @param config      Named list from bcf_config()
+#' @return A BCFModel object
+#' @export
+fit_bcf <- function(X, y, z, pi_hat, X_test, pi_hat_test = NULL,
+                    n_burnin  = 200L, n_samples = 1000L,
+                    seed = 42L, config = bcf_config()) {
+  sc     <- .scale_y(y)
+  config <- .scale_bcf_config(config)
+  if (is.null(pi_hat_test)) pi_hat_test <- rep(0.0, nrow(X_test))
+  ptr <- fit_bcf_cpp(as.matrix(X), sc$y_scaled, as.numeric(z), as.numeric(pi_hat),
+                     as.matrix(X_test), as.numeric(pi_hat_test),
+                     as.integer(n_burnin), as.integer(n_samples), as.integer(seed),
+                     config$mu, config$tau)
+  structure(list(ptr = ptr, y_mean = sc$y_mean, y_sd = sc$y_sd), class = "BCFModel")
+}
+
+#' Fit a BCF model via GFR (XBCF)
+#'
+#' @param X           Numeric matrix [n x p] of training covariates
+#' @param y           Numeric vector [n] of training responses
+#' @param z           Numeric vector [n] of binary treatment indicators
+#' @param pi_hat      Numeric vector [n] of estimated propensity scores
+#' @param X_test      Numeric matrix [n_test x p] of test covariates
+#' @param pi_hat_test Numeric vector [n_test] of test propensity scores
+#' @param n_burnin    Number of GFR burn-in sweeps (default 15)
+#' @param n_samples   Number of GFR samples (default 25)
+#' @param seed        Integer random seed (default 42)
+#' @param config      Named list from bcf_config()
+#' @return A BCFModel object
+#' @export
+fit_xbcf <- function(X, y, z, pi_hat, X_test, pi_hat_test = NULL,
+                     n_burnin  = 15L, n_samples = 25L,
+                     seed = 42L, config = bcf_config()) {
+  sc     <- .scale_y(y)
+  config <- .scale_bcf_config(config)
+  if (is.null(pi_hat_test)) pi_hat_test <- rep(0.0, nrow(X_test))
+  ptr <- fit_xbcf_cpp(as.matrix(X), sc$y_scaled, as.numeric(z), as.numeric(pi_hat),
+                      as.matrix(X_test), as.numeric(pi_hat_test),
+                      as.integer(n_burnin), as.integer(n_samples), as.integer(seed),
+                      config$mu, config$tau)
+  structure(list(ptr = ptr, y_mean = sc$y_mean, y_sd = sc$y_sd), class = "BCFModel")
+}
+
+#' Fit a warm-start BCF model (GFR burn-in followed by MCMC sampling)
+#'
+#' @param X              Numeric matrix [n x p] of training covariates
+#' @param y              Numeric vector [n] of training responses
+#' @param z              Numeric vector [n] of binary treatment indicators
+#' @param pi_hat         Numeric vector [n] of estimated propensity scores
+#' @param X_test         Numeric matrix [n_test x p] of test covariates
+#' @param pi_hat_test    Numeric vector [n_test] of test propensity scores
+#' @param n_gfr_burnin   Number of GFR warm-up sweeps (default 20)
+#' @param n_mcmc_burnin  Additional MCMC burn-in after GFR (default 0)
+#' @param n_samples      Number of MCMC posterior samples (default 200)
+#' @param seed           Integer random seed (default 42)
+#' @param keep_gfr_samples If TRUE, prepend GFR draws to result (default FALSE)
+#' @param config         Named list from bcf_config()
+#' @return A BCFModel object
+#' @export
+fit_warmstart_bcf <- function(X, y, z, pi_hat, X_test, pi_hat_test = NULL,
+                               n_gfr_burnin  = 20L, n_mcmc_burnin = 0L,
+                               n_samples = 200L, seed = 42L,
+                               keep_gfr_samples = FALSE,
+                               config = bcf_config()) {
+  sc     <- .scale_y(y)
+  config <- .scale_bcf_config(config)
+  if (is.null(pi_hat_test)) pi_hat_test <- rep(0.0, nrow(X_test))
+  ptr <- fit_warmstart_bcf_cpp(as.matrix(X), sc$y_scaled, as.numeric(z), as.numeric(pi_hat),
+                                as.matrix(X_test), as.numeric(pi_hat_test),
+                                as.integer(n_gfr_burnin), as.integer(n_mcmc_burnin),
+                                as.integer(n_samples), as.integer(seed),
+                                as.logical(keep_gfr_samples),
+                                config$mu, config$tau)
+  structure(list(ptr = ptr, y_mean = sc$y_mean, y_sd = sc$y_sd), class = "BCFModel")
+}
+
+#' Posterior CATE samples at test points
+#'
+#' @param model A BCFModel object
+#' @return Numeric matrix [n_samples x n_test] of tau(x) draws
+#' @export
+test_tau_samples <- function(model) {
+  test_tau_samples_cpp(model$ptr) * model$y_sd
+}
+
+#' Posterior prognostic effect samples at test points
+#'
+#' @param model A BCFModel object
+#' @return Numeric matrix [n_samples x n_test] of mu(x) draws
+#' @export
+test_mu_samples <- function(model) {
+  test_mu_samples_cpp(model$ptr) * model$y_sd + model$y_mean
+}
+
+#' Posterior noise-variance samples from a BCF model
+#'
+#' @param model A BCFModel object
+#' @return Numeric vector [n_samples]
+#' @export
+sigma2_bcf_samples <- function(model) {
+  sigma2_bcf_samples_cpp(model$ptr) * model$y_sd^2
+}
+
+#' Predict CATE tau(x) on new data
+#'
+#' @param object  A BCFModel object
+#' @param newdata Numeric matrix [n_new x p] of new covariates
+#' @param ...     Ignored
+#' @return Numeric matrix [n_samples x n_new]
+#' @export
+predict_tau <- function(object, newdata, ...) {
+  predict_tau_cpp(object$ptr, as.matrix(newdata)) * object$y_sd
+}
+
+#' Predict prognostic effect mu(x, pi_hat) on new data
+#'
+#' @param object   A BCFModel object
+#' @param newdata  Numeric matrix [n_new x p] of new covariates
+#' @param pi_hat   Numeric vector [n_new] of propensity scores for new data
+#' @param ...      Ignored
+#' @return Numeric matrix [n_samples x n_new]
+#' @export
+predict_mu <- function(object, newdata, pi_hat, ...) {
+  X_mu <- cbind(as.matrix(newdata), as.numeric(pi_hat))
+  predict_mu_cpp(object$ptr, X_mu) * object$y_sd + object$y_mean
+}

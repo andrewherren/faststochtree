@@ -17,7 +17,8 @@ static void propose_grow(Tree& tree, const QuantizedX& Xq, const float* resid,
                          float prob_grow,
                          std::vector<int>& flat_obs, std::vector<int>& leaf_start,
                          std::vector<int>& leaf_idx,  std::vector<int>& leaf_counts,
-                         const std::vector<int>& ls) {
+                         const std::vector<int>& ls,
+                         const float* z = nullptr) {
     int num_leaves = (int)ls.size();
 
     int lk = ls[rng.randint(0, num_leaves)];
@@ -38,23 +39,30 @@ static void propose_grow(Tree& tree, const QuantizedX& Xq, const float* resid,
 
     uint8_t threshold = (uint8_t)rng.randint((int)var_min, (int)var_max);
 
-    // O(n_k) pass 2: compute split statistics
+    // O(n_k) pass 2: compute split statistics.
+    // For regression leaf (z != nullptr): s_wyx = Σ r_i·z_i, s_wxx = Σ z_i.
+    // For constant leaf  (z == nullptr): s_wyx = Σ r_i,     s_wxx = obs count.
+    // min_samples_leaf always applies to total obs (left_n / right_n).
     float left_sum = 0.f, right_sum = 0.f, node_sum = 0.f;
+    float left_nw  = 0.f, right_nw  = 0.f, node_nw  = 0.f;
     int   left_n   = 0,   right_n   = 0;
     for (int k = beg; k < beg + n_k; k++) {
-        int   obs = flat_obs[k];
-        float r   = resid[obs] + pred_off[obs];
-        node_sum += r;
-        if (Xq.at(obs, var) <= threshold) { left_sum  += r; left_n++;  }
-        else                              { right_sum += r; right_n++; }
+        int   obs   = flat_obs[k];
+        float r     = resid[obs] + pred_off[obs];
+        float omega = z ? z[obs] : 1.f;
+        node_sum += r * omega; node_nw += omega;
+        if (Xq.at(obs, var) <= threshold) {
+            left_sum  += r * omega; left_nw  += omega; left_n++;
+        } else {
+            right_sum += r * omega; right_nw += omega; right_n++;
+        }
     }
-    int node_n = n_k;
 
     if (left_n < cfg.min_samples_leaf || right_n < cfg.min_samples_leaf) return;
 
-    float split_log_ml    = leaf_log_ml(left_sum,  left_n,  sigma2, cfg.leaf_prior_var)
-                          + leaf_log_ml(right_sum, right_n, sigma2, cfg.leaf_prior_var);
-    float no_split_log_ml = leaf_log_ml(node_sum,  node_n,  sigma2, cfg.leaf_prior_var);
+    float split_log_ml    = leaf_log_ml(left_sum,  left_nw,  sigma2, cfg.leaf_prior_var)
+                          + leaf_log_ml(right_sum, right_nw, sigma2, cfg.leaf_prior_var);
+    float no_split_log_ml = leaf_log_ml(node_sum,  node_nw,  sigma2, cfg.leaf_prior_var);
 
     float pg  = cfg.alpha / std::pow(1.f + leaf_depth,     cfg.beta);
     float pgl = cfg.alpha / std::pow(1.f + leaf_depth + 1, cfg.beta);
@@ -103,7 +111,8 @@ static void propose_prune(Tree& tree, const float* resid, const float* pred_off,
                           float prob_prune,
                           std::vector<int>& flat_obs, std::vector<int>& leaf_start,
                           std::vector<int>& leaf_idx,  std::vector<int>& leaf_counts,
-                          const std::vector<int>& lps, int num_leaves) {
+                          const std::vector<int>& lps, int num_leaves,
+                          const float* z = nullptr) {
     int num_lp     = (int)lps.size();
 
     int pk          = lps[rng.randint(0, num_lp)];
@@ -114,22 +123,29 @@ static void propose_prune(Tree& tree, const float* resid, const float* pred_off,
     int beg_l = leaf_start[left_child],  n_l = leaf_counts[left_child];
     int beg_r = leaf_start[right_child], n_r = leaf_counts[right_child];
 
-    // O(n_k) scan: sum left and right children's obs independently
+    // O(n_k) scan: z-weighted sufficient stats for the marginal likelihood;
+    // total obs counts (n_l, n_r) used for tree-structure bookkeeping.
     float left_sum = 0.f, right_sum = 0.f;
+    float left_nw  = 0.f, right_nw  = 0.f;
     for (int k = beg_l; k < beg_l + n_l; k++) {
         int obs = flat_obs[k];
-        left_sum += resid[obs] + pred_off[obs];
+        float omega = z ? z[obs] : 1.f;
+        left_sum += (resid[obs] + pred_off[obs]) * omega;
+        left_nw  += omega;
     }
     for (int k = beg_r; k < beg_r + n_r; k++) {
         int obs = flat_obs[k];
-        right_sum += resid[obs] + pred_off[obs];
+        float omega = z ? z[obs] : 1.f;
+        right_sum += (resid[obs] + pred_off[obs]) * omega;
+        right_nw  += omega;
     }
     float node_sum = left_sum + right_sum;
+    float node_nw  = left_nw  + right_nw;
     int   node_n   = n_l + n_r;
 
-    float split_log_ml    = leaf_log_ml(left_sum,  n_l,    sigma2, cfg.leaf_prior_var)
-                          + leaf_log_ml(right_sum, n_r,    sigma2, cfg.leaf_prior_var);
-    float no_split_log_ml = leaf_log_ml(node_sum,  node_n, sigma2, cfg.leaf_prior_var);
+    float split_log_ml    = leaf_log_ml(left_sum,  left_nw,  sigma2, cfg.leaf_prior_var)
+                          + leaf_log_ml(right_sum, right_nw, sigma2, cfg.leaf_prior_var);
+    float no_split_log_ml = leaf_log_ml(node_sum,  node_nw,  sigma2, cfg.leaf_prior_var);
 
     float pg  = cfg.alpha / std::pow(1.f + leaf_depth,     cfg.beta);
     float pgl = cfg.alpha / std::pow(1.f + leaf_depth + 1, cfg.beta);
@@ -170,7 +186,7 @@ static void propose_move(Tree& tree, const QuantizedX& Xq, const float* resid,
                          const BARTConfig& cfg, RNG& rng,
                          std::vector<int>& flat_obs, std::vector<int>& leaf_start,
                          std::vector<int>& leaf_idx,  std::vector<int>& leaf_counts,
-                         Workspace& ws) {
+                         Workspace& ws, const float* z = nullptr) {
     tree.leaves(ws.leaves_buf);
     tree.leaf_parents(ws.leaf_parents_buf);
     const auto& ls  = ws.leaves_buf;
@@ -190,10 +206,10 @@ static void propose_move(Tree& tree, const QuantizedX& Xq, const float* resid,
 
     if (rng.uniform() < prob_grow)
         propose_grow(tree,  Xq, resid, pred_off, sigma2, cfg, rng, prob_grow,
-                     flat_obs, leaf_start, leaf_idx, leaf_counts, ls);
+                     flat_obs, leaf_start, leaf_idx, leaf_counts, ls, z);
     else
         propose_prune(tree,     resid, pred_off, sigma2, cfg, rng, prob_prune,
-                      flat_obs, leaf_start, leaf_idx, leaf_counts, lps, (int)ls.size());
+                      flat_obs, leaf_start, leaf_idx, leaf_counts, lps, (int)ls.size(), z);
 }
 
 // -----------------------------------------------------------------------
@@ -285,6 +301,96 @@ void mcmc_sweep(BARTState& s, const BARTConfig& cfg, RNG& rng) {
         }
     }
     sample_sigma2(s.residual.data(), s.n, s.sigma2, cfg, rng);
+}
+
+// ── BCF: regression leaf sampler and sweep ────────────────────────────────────
+
+void sample_leaves_regression(Tree& tree, const float* resid, const float* pred_off,
+                               const float* z, int n, float sigma2, const BARTConfig& cfg,
+                               RNG& rng, const std::vector<int>& leaf_idx, Workspace& ws) {
+    float tau = cfg.leaf_prior_var;
+    int   sz  = tree.full_size + 1;
+
+    std::memset(ws.s0, 0, sz * sizeof(float)); std::memset(ws.s1, 0, sz * sizeof(float));
+    std::memset(ws.s2, 0, sz * sizeof(float)); std::memset(ws.s3, 0, sz * sizeof(float));
+    std::memset(ws.c0, 0, sz * sizeof(int));   std::memset(ws.c1, 0, sz * sizeof(int));
+    std::memset(ws.c2, 0, sz * sizeof(int));   std::memset(ws.c3, 0, sz * sizeof(int));
+
+    // 4-lane scatter: accumulate s_wyx (z-weighted sum) and s_wxx (z-weighted count).
+    int n4 = (n / 4) * 4;
+    for (int i = 0; i < n4; i += 4) {
+        int l0 = leaf_idx[i],   l1 = leaf_idx[i+1],
+            l2 = leaf_idx[i+2], l3 = leaf_idx[i+3];
+        float z0 = z[i], z1 = z[i+1], z2 = z[i+2], z3 = z[i+3];
+        ws.s0[l0] += (resid[i]   + pred_off[i])   * z0; ws.c0[l0] += (int)z0;
+        ws.s1[l1] += (resid[i+1] + pred_off[i+1]) * z1; ws.c1[l1] += (int)z1;
+        ws.s2[l2] += (resid[i+2] + pred_off[i+2]) * z2; ws.c2[l2] += (int)z2;
+        ws.s3[l3] += (resid[i+3] + pred_off[i+3]) * z3; ws.c3[l3] += (int)z3;
+    }
+    for (int i = n4; i < n; i++) {
+        int   k  = leaf_idx[i];
+        float zi = z[i];
+        ws.s0[k] += (resid[i] + pred_off[i]) * zi;
+        ws.c0[k] += (int)zi;
+    }
+
+    for (int k = 1; k < sz; k++) {
+        float s_wxx = (float)(ws.c0[k] + ws.c1[k] + ws.c2[k] + ws.c3[k]);
+        if (s_wxx == 0.f) continue;
+        float s_wyx = ws.s0[k] + ws.s1[k] + ws.s2[k] + ws.s3[k];
+        float post_mean = (tau * s_wyx) / (s_wxx * tau + sigma2);
+        float post_var  = (tau * sigma2) / (s_wxx * tau + sigma2);
+        tree.leaf_value[k] = post_mean + std::sqrt(post_var) * rng.normal();
+    }
+}
+
+void bcf_mcmc_sweep(std::vector<float>& shared_resid, const float* z,
+                    BARTState& mu_s, const BARTConfig& mu_cfg,
+                    BARTState& tau_s, const BARTConfig& tau_cfg,
+                    float& sigma2, RNG& rng) {
+    int n = mu_s.n;
+
+    // --- μ forest: constant leaf, no z ---
+    for (int t = 0; t < mu_cfg.num_trees; t++) {
+        propose_move(mu_s.trees[t], mu_s.Xq,
+                     shared_resid.data(), mu_s.pred[t].data(),
+                     sigma2, mu_cfg, rng,
+                     mu_s.flat_obs[t], mu_s.leaf_start[t],
+                     mu_s.leaf_indices[t], mu_s.leaf_counts[t], mu_s.ws);
+
+        sample_leaves(mu_s.trees[t], shared_resid.data(), mu_s.pred[t].data(),
+                      n, sigma2, mu_cfg, rng, mu_s.leaf_indices[t], mu_s.ws);
+
+        for (int i = 0; i < n; i++) {
+            float pred_new   = mu_s.trees[t].leaf_value[mu_s.leaf_indices[t][i]];
+            shared_resid[i] += mu_s.pred[t][i] - pred_new;
+            mu_s.pred[t][i]  = pred_new;
+        }
+    }
+
+    // --- τ forest: regression leaf on z ---
+    for (int t = 0; t < tau_cfg.num_trees; t++) {
+        propose_move(tau_s.trees[t], tau_s.Xq,
+                     shared_resid.data(), tau_s.pred[t].data(),
+                     sigma2, tau_cfg, rng,
+                     tau_s.flat_obs[t], tau_s.leaf_start[t],
+                     tau_s.leaf_indices[t], tau_s.leaf_counts[t], tau_s.ws, z);
+
+        sample_leaves_regression(tau_s.trees[t], shared_resid.data(), tau_s.pred[t].data(),
+                                  z, n, sigma2, tau_cfg, rng,
+                                  tau_s.leaf_indices[t], tau_s.ws);
+
+        // pred[t][i] stores β_leaf · z[i] so it contributes correctly to shared_resid
+        for (int i = 0; i < n; i++) {
+            float beta_new     = tau_s.trees[t].leaf_value[tau_s.leaf_indices[t][i]];
+            float pred_new_z   = beta_new * z[i];
+            shared_resid[i]   += tau_s.pred[t][i] - pred_new_z;
+            tau_s.pred[t][i]   = pred_new_z;
+        }
+    }
+
+    sample_sigma2(shared_resid.data(), n, sigma2, mu_cfg, rng);
+    mu_s.sigma2 = tau_s.sigma2 = sigma2;
 }
 
 } // namespace bart
