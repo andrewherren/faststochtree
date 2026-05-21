@@ -119,7 +119,7 @@ with_timeout() {
 
 build_for_tag() {
   local src="$1" bld="$2"
-  local exe="$bld/faststochtree_bench"
+  local exe="$bld/faststochtree_bart_bench"
   if [[ -f "$exe" ]] && ! $FORCE_REBUILD; then printf "  (using cached build)\n"; return; fi
   rm -rf "$bld"
   cmake -S "$src" -B "$bld" \
@@ -127,7 +127,7 @@ build_for_tag() {
     -DCMAKE_COLOR_DIAGNOSTICS=OFF \
     -DFETCHCONTENT_BASE_DIR="$FETCH_CACHE" \
     --log-level=ERROR > /dev/null 2>&1
-  cmake --build "$bld" --target faststochtree_bench \
+  cmake --build "$bld" --target faststochtree_bart_bench \
     -j"$(ncpus)" > /dev/null 2>&1
 }
 
@@ -244,7 +244,7 @@ if [[ ${#TAGS[@]} -eq 0 ]]; then
   printf "  Building..."
   build_for_tag "$REPO_DIR" "$REPO_DIR/build-release"
   printf " done\n\n"
-  run_tag "$current_tag" "$REPO_DIR/build-release/faststochtree_bench"
+  run_tag "$current_tag" "$REPO_DIR/build-release/faststochtree_bart_bench"
 
 else
   echo "=== Tags to benchmark: ${TAGS[*]} ==="
@@ -264,7 +264,7 @@ else
     echo ""
     echo "--- $tag ---"
     local_bld="$BENCH_BUILDS/$tag"
-    local_exe="$local_bld/faststochtree_bench"
+    local_exe="$local_bld/faststochtree_bart_bench"
 
     if [[ ! -f "$local_exe" ]] || $FORCE_REBUILD; then
       wt="$WT_BASE/$tag"

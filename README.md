@@ -64,12 +64,14 @@ cmake --build build-release -j$(sysctl -n hw.logicalcpu)
 
 ---
 
-## Benchmark binary
+## Benchmark binaries
 
-One of the standard build artifacts for `faststochtree` (crucial to its development) is a benchmarking binary that fits a BART / XBART model to generated dataset. After building, the program can be run as follows.
+### BART benchmark — `faststochtree_bart_bench`
+
+Fits a BART or XBART model to a synthetic regression dataset.
 
 ```bash
-./build-release/faststochtree_bench [options]
+./build-release/faststochtree_bart_bench [options]
 ```
 
 **DGP:** `y = sin(2π·x₁) + N(0, σ²)`, `X ~ U[0,1]^(n×p)`
@@ -94,7 +96,48 @@ Each of the `--iters` repetitions uses independent data and model seeds derived 
 To run a quick "smoke-test":
 
 ```bash
-./build-release/faststochtree_bench --n_train 2000 --p 10 --trees 50 --burnin 50 --samples 100 --iters 3
+./build-release/faststochtree_bart_bench --n_train 2000 --p 10 --trees 50 --burnin 50 --samples 100 --iters 3
+```
+
+### BCF benchmark — `faststochtree_bcf_bench`
+
+Fits a BCF, XBCF, or warm-start BCF model to a synthetic causal-inference dataset and reports CATE RMSE.
+
+```bash
+./build-release/faststochtree_bcf_bench [options]
+```
+
+**DGP:** `μ(x) = 2·sin(π·x₁)`, `τ(x) = 3·x₂`, `ê(x) = 0.3 + 0.4·x₁`, `z ~ Bernoulli(ê(x))`, `y = μ(x) + τ(x)·z + N(0, σ²)`. True average CATE is 1.5; null-model CATE RMSE (predicting 1.5 everywhere) is ~0.87.
+
+| Option | Default | Description |
+|---|---|---|
+| `--mode` | `bcf` | `bcf` (MCMC), `xbcf` (GFR), or `warmstart_bcf` |
+| `--n_train` | `5000` | Training set size |
+| `--n_test` | `500` | Test set size |
+| `--p` | `10` | Number of covariates |
+| `--mu_trees` | `50` | Trees in the prognostic (μ) forest |
+| `--tau_trees` | `20` | Trees in the treatment-effect (τ) forest |
+| `--burnin` | `100` / `20` | Burn-in sweeps (bcf / xbcf defaults) |
+| `--samples` | `200` / `25` | Posterior samples (bcf / xbcf defaults) |
+| `--gfr_burnin` | `20` | GFR warm-up sweeps for `warmstart_bcf` |
+| `--threads` | `1` | Thread count |
+| `--iters` | `5` | Independent repetitions (different seeds) |
+| `--seed` | `42` | Base random seed |
+| `--sigma` | `1.0` | True noise standard deviation |
+| `--csv` | `bench/results/bcf_bench_results.csv` | Append per-iteration rows to this file |
+
+To run a quick "smoke-test":
+
+```bash
+./build-release/faststochtree_bcf_bench --n_train 1000 --burnin 20 --samples 50 --iters 1
+```
+
+To benchmark all three BCF modes:
+
+```bash
+./build-release/faststochtree_bcf_bench --mode bcf          --iters 5
+./build-release/faststochtree_bcf_bench --mode xbcf         --iters 5
+./build-release/faststochtree_bcf_bench --mode warmstart_bcf --iters 5
 ```
 
 ---
