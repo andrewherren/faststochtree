@@ -51,6 +51,12 @@ gtest_discover_tests(test_bart)
 gtest_discover_tests(test_tree)
 gtest_discover_tests(test_bcf)
 
+# Metal GPU benchmark (macOS only) — opt-in via -DGPU_METAL=ON
+option(GPU_METAL "Enable Apple Metal GPU benchmark" OFF)
+if(GPU_METAL)
+    add_subdirectory(gpu)
+endif()
+
 # Python bindings (built by scikit-build-core via: pip install ./python)
 option(BUILD_PYTHON_BINDINGS "Build pybind11 Python extension" OFF)
 if(BUILD_PYTHON_BINDINGS)
