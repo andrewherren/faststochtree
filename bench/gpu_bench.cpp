@@ -225,7 +225,7 @@ static void run_gfr_sweep_bench(gpu::MetalContext& ctx) {
     const int n      = 100000;
     const int n_test = 0;
 
-    for (int p : {10, 20}) {
+    for (int p : {10, 20, 50, 100}) {
         for (int T : {50, 200}) {
             // Generate random training data.
             std::mt19937 data_rng(123);
