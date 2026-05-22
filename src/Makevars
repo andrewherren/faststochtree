@@ -6,10 +6,10 @@ PKG_LIBS = MetalContext_gpu.o GFRAccel_gpu.o -framework Metal -framework Foundat
 $(SHLIB): MetalContext_gpu.o GFRAccel_gpu.o
 
 MetalContext_gpu.o: ../gpu/MetalContext.mm
-	$(CXX) -x objective-c++ $(ALL_CPPFLAGS) $(CXXFLAGS) $(CXXPICFLAGS) -c -o $@ $<
+	$(CXX) -x objective-c++ $(ALL_CPPFLAGS) $(CXXFLAGS) $(CXXPICFLAGS) $(PKG_CXXFLAGS) -c -o $@ $<
 
 GFRAccel_gpu.o: ../gpu/GFRAccel.cpp
-	$(CXX) $(ALL_CPPFLAGS) $(CXXFLAGS) $(CXXPICFLAGS) -c -o $@ $<
+	$(CXX) $(ALL_CPPFLAGS) $(CXXFLAGS) $(CXXPICFLAGS) $(PKG_CXXFLAGS) -c -o $@ $<
 else
 PKG_CPPFLAGS = -I../include -std=c++17
 PKG_CXXFLAGS = -O3
