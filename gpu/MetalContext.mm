@@ -183,6 +183,22 @@ struct MetalContext::Impl {
     id<MTLComputePipelineState> hist_pso = nil;
     id<MTLComputePipelineState> scan_pso = nil;
     std::string                 name;
+
+    // Persistent shared buffers — grown on demand, never shrunk.
+    // Eliminates per-dispatch Metal buffer allocation for feat_order and node_ranges.
+    id<MTLBuffer> buf_fo     = nil;  NSUInteger buf_fo_cap     = 0;
+    id<MTLBuffer> buf_ranges = nil;  NSUInteger buf_ranges_cap = 0;
+
+    id<MTLBuffer> ensure(id<MTLBuffer>& buf, NSUInteger& cap,
+                         const void* src, NSUInteger bytes) {
+        if (bytes > cap) {
+            buf = [device newBufferWithLength:bytes
+                          options:MTLResourceStorageModeShared];
+            cap = bytes;
+        }
+        memcpy([buf contents], src, bytes);
+        return buf;
+    }
 };
 
 MetalContext::MetalContext() : impl_(new Impl()) {
@@ -272,27 +288,30 @@ MetalContext::HistResult MetalContext::histogram_build(
     HistResult res;
     if (!impl_ || !impl_->hist_pso) return res;
 
-    auto shared_buf_from = [&](const void* src, size_t bytes) {
-        return [impl_->device newBufferWithBytes:src
-                               length:bytes
+    auto new_shared = [&](size_t bytes) {
+        return [impl_->device newBufferWithLength:bytes
                                options:MTLResourceStorageModeShared];
     };
+    auto fill_shared = [&](const void* src, size_t bytes) {
+        id<MTLBuffer> b = [impl_->device newBufferWithBytes:src
+                               length:bytes
+                               options:MTLResourceStorageModeShared];
+        return b;
+    };
 
-    id<MTLBuffer> buf_Xq     = shared_buf_from(Xq,          (size_t)n * p       * sizeof(uint8_t));
-    id<MTLBuffer> buf_resid  = shared_buf_from(resid,        (size_t)n           * sizeof(float));
-    id<MTLBuffer> buf_obs    = shared_buf_from(obs_list,     (size_t)obs_count   * sizeof(int));
-    id<MTLBuffer> buf_ranges = shared_buf_from(node_ranges,  (size_t)n_nodes * 2 * sizeof(int));
-    id<MTLBuffer> buf_fo     = feat_order
-        ? shared_buf_from(feat_order, (size_t)n_nodes * m * sizeof(int))
+    id<MTLBuffer> buf_Xq    = fill_shared(Xq,       (size_t)n * p       * sizeof(uint8_t));
+    id<MTLBuffer> buf_resid = fill_shared(resid,     (size_t)n           * sizeof(float));
+    id<MTLBuffer> buf_obs   = fill_shared(obs_list,  (size_t)obs_count   * sizeof(int));
+    id<MTLBuffer> buf_ranges = impl_->ensure(impl_->buf_ranges, impl_->buf_ranges_cap,
+                                             node_ranges, (size_t)n_nodes * 2 * sizeof(int));
+    id<MTLBuffer> buf_fo = feat_order
+        ? impl_->ensure(impl_->buf_fo, impl_->buf_fo_cap,
+                        feat_order, (size_t)n_nodes * m * sizeof(int))
         : nil;
 
     const int out_elems = n_nodes * m * 256;
-    id<MTLBuffer> buf_sum = [impl_->device
-        newBufferWithLength:(size_t)out_elems * sizeof(float)
-        options:MTLResourceStorageModeShared];
-    id<MTLBuffer> buf_cnt = [impl_->device
-        newBufferWithLength:(size_t)out_elems * sizeof(int)
-        options:MTLResourceStorageModeShared];
+    id<MTLBuffer> buf_sum = new_shared((size_t)out_elems * sizeof(float));
+    id<MTLBuffer> buf_cnt = new_shared((size_t)out_elems * sizeof(int));
 
     // ---- begin timed region ----
     auto host_t0 = std::chrono::high_resolution_clock::now();
@@ -342,32 +361,31 @@ MetalContext::HistResult MetalContext::histogram_and_scan(
     HistResult res;
     if (!impl_ || !impl_->hist_pso || !impl_->scan_pso) return res;
 
-    auto shared_buf_from = [&](const void* src, size_t bytes) {
-        return [impl_->device newBufferWithBytes:src
-                               length:bytes
+    auto new_shared = [&](size_t bytes) {
+        return [impl_->device newBufferWithLength:bytes
+                               options:MTLResourceStorageModeShared];
+    };
+    auto fill_shared = [&](const void* src, size_t bytes) {
+        return [impl_->device newBufferWithBytes:src length:bytes
                                options:MTLResourceStorageModeShared];
     };
 
-    id<MTLBuffer> buf_Xq     = shared_buf_from(Xq,         (size_t)n * p       * sizeof(uint8_t));
-    id<MTLBuffer> buf_resid  = shared_buf_from(resid,       (size_t)n           * sizeof(float));
-    id<MTLBuffer> buf_obs    = shared_buf_from(obs_list,    (size_t)obs_count   * sizeof(int));
-    id<MTLBuffer> buf_ranges = shared_buf_from(node_ranges, (size_t)n_nodes * 2 * sizeof(int));
-    id<MTLBuffer> buf_fo     = feat_order
-        ? shared_buf_from(feat_order, (size_t)n_nodes * m * sizeof(int))
+    id<MTLBuffer> buf_Xq    = fill_shared(Xq,      (size_t)n * p       * sizeof(uint8_t));
+    id<MTLBuffer> buf_resid = fill_shared(resid,    (size_t)n           * sizeof(float));
+    id<MTLBuffer> buf_obs   = fill_shared(obs_list, (size_t)obs_count   * sizeof(int));
+    id<MTLBuffer> buf_ranges = impl_->ensure(impl_->buf_ranges, impl_->buf_ranges_cap,
+                                             node_ranges, (size_t)n_nodes * 2 * sizeof(int));
+    id<MTLBuffer> buf_fo = feat_order
+        ? impl_->ensure(impl_->buf_fo, impl_->buf_fo_cap,
+                        feat_order, (size_t)n_nodes * m * sizeof(int))
         : nil;
 
     const int hist_elems = n_nodes * m * 256;
     const int log_elems  = n_nodes * m;
 
-    id<MTLBuffer> buf_sum = [impl_->device
-        newBufferWithLength:(size_t)hist_elems * sizeof(float)
-        options:MTLResourceStorageModeShared];
-    id<MTLBuffer> buf_cnt = [impl_->device
-        newBufferWithLength:(size_t)hist_elems * sizeof(int)
-        options:MTLResourceStorageModeShared];
-    id<MTLBuffer> buf_log = [impl_->device
-        newBufferWithLength:(size_t)log_elems * sizeof(float)
-        options:MTLResourceStorageModeShared];
+    id<MTLBuffer> buf_sum = new_shared((size_t)hist_elems * sizeof(float));
+    id<MTLBuffer> buf_cnt = new_shared((size_t)hist_elems * sizeof(int));
+    id<MTLBuffer> buf_log = new_shared((size_t)log_elems  * sizeof(float));
 
     // ---- begin timed region ----
     auto host_t0 = std::chrono::high_resolution_clock::now();
