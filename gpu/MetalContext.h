@@ -33,15 +33,17 @@ struct MetalContext {
     //
     // Xq          [n * p]         column-major uint8 quantized covariates
     // resid       [n]             partial residuals
-    // obs_list    [total_obs]     observation indices, all nodes concatenated
+    // obs_list    [obs_count]     observation indices; ranges index into this array
+    // obs_count                   number of valid elements in obs_list
     // node_ranges [n_nodes * 2]   {beg, end} pairs into obs_list, one per node
     // out_sum     [n_nodes*p*256] sum histograms — written on return
     // out_cnt     [n_nodes*p*256] count histograms — written on return
     //
     // Output layout: out_sum[(node * p + feat) * 256 + bin]
     // Single-node convenience: pass node_ranges = {0, n_k} and n_nodes = 1.
+    // obs_count must cover the maximum end index in node_ranges.
     HistResult histogram_build(const uint8_t* Xq, const float* resid,
-                               const int* obs_list,
+                               const int* obs_list, int obs_count,
                                const int* node_ranges,
                                int n, int p, int n_nodes,
                                float* out_sum, int* out_cnt);

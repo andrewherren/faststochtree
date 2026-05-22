@@ -4,6 +4,7 @@ find_library(FOUNDATION_LIB Foundation REQUIRED)
 
 add_executable(gpu_bench
     ../bench/gpu_bench.cpp
+    GFRAccel.cpp
     MetalContext.mm
 )
 

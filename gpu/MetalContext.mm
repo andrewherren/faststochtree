@@ -196,16 +196,12 @@ double MetalContext::noop_roundtrip_us() {
 
 MetalContext::HistResult MetalContext::histogram_build(
     const uint8_t* Xq, const float* resid,
-    const int* obs_list, const int* node_ranges,
+    const int* obs_list, int obs_count, const int* node_ranges,
     int n, int p, int n_nodes,
     float* out_sum, int* out_cnt)
 {
     HistResult res;
     if (!impl_ || !impl_->hist_pso) return res;
-
-    // Compute total observations across all nodes.
-    int total_obs = 0;
-    for (int i = 0; i < n_nodes; i++) total_obs += node_ranges[2*i+1] - node_ranges[2*i];
 
     // All buffers use shared storage: no DMA copy on Apple Silicon.
     // Buffer creation is intentionally excluded from timing — in a full
@@ -216,9 +212,9 @@ MetalContext::HistResult MetalContext::histogram_build(
                                options:MTLResourceStorageModeShared];
     };
 
-    id<MTLBuffer> buf_Xq     = shared_buf_from(Xq,          (size_t)n * p    * sizeof(uint8_t));
-    id<MTLBuffer> buf_resid  = shared_buf_from(resid,        (size_t)n        * sizeof(float));
-    id<MTLBuffer> buf_obs    = shared_buf_from(obs_list,     (size_t)total_obs * sizeof(int));
+    id<MTLBuffer> buf_Xq     = shared_buf_from(Xq,          (size_t)n * p       * sizeof(uint8_t));
+    id<MTLBuffer> buf_resid  = shared_buf_from(resid,        (size_t)n           * sizeof(float));
+    id<MTLBuffer> buf_obs    = shared_buf_from(obs_list,     (size_t)obs_count   * sizeof(int));
     id<MTLBuffer> buf_ranges = shared_buf_from(node_ranges,  (size_t)n_nodes * 2 * sizeof(int));
 
     const int out_elems = n_nodes * p * 256;

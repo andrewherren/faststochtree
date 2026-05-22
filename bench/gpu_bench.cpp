@@ -1,4 +1,8 @@
+#include "GFRAccel.h"
 #include "MetalContext.h"
+#include "faststochtree/mcmc.hpp"
+#include "faststochtree/quantize.hpp"
+#include "faststochtree/gfr.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -90,12 +94,12 @@ static void run_single_node_sweep(gpu::MetalContext& ctx, std::mt19937& rng) {
 
             int ranges[2] = {0, n_k};
             // warmup
-            ctx.histogram_build(Xq.data(), resid.data(), obs_list.data(), ranges,
+            ctx.histogram_build(Xq.data(), resid.data(), obs_list.data(), n_k, ranges,
                                  n, p, 1, gpu_sum.data(), gpu_cnt.data());
             double best_k = 1e18, best_h = 1e18;
             for (int i = 0; i < 5; i++) {
                 auto r = ctx.histogram_build(Xq.data(), resid.data(), obs_list.data(),
-                                             ranges, n, p, 1,
+                                             n_k, ranges, n, p, 1,
                                              gpu_sum.data(), gpu_cnt.data());
                 if (r.gpu_kernel_us < best_k) { best_k = r.gpu_kernel_us; best_h = r.host_us; }
             }
@@ -179,13 +183,13 @@ static void run_bfs_sweep(gpu::MetalContext& ctx, std::mt19937& rng) {
 
             // GPU: one batched dispatch for all nodes at this depth.
             // Warmup first.
-            ctx.histogram_build(Xq.data(), resid.data(), obs_list.data(),
+            ctx.histogram_build(Xq.data(), resid.data(), obs_list.data(), n,
                                  node_ranges.data(), n, p, n_nodes,
                                  nullptr, nullptr);
             double best_k = 1e18, best_h = 1e18;
             for (int i = 0; i < 5; i++) {
                 auto r = ctx.histogram_build(Xq.data(), resid.data(), obs_list.data(),
-                                             node_ranges.data(), n, p, n_nodes,
+                                             n, node_ranges.data(), n, p, n_nodes,
                                              nullptr, nullptr);
                 if (r.gpu_kernel_us < best_k) { best_k = r.gpu_kernel_us; best_h = r.host_us; }
             }
@@ -202,6 +206,83 @@ static void run_bfs_sweep(gpu::MetalContext& ctx, std::mt19937& rng) {
         }
         printf("\n");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Section 4: end-to-end GFR sweep — CPU gfr_sweep vs GPU gfr_sweep_gpu
+//
+// Uses two independent BARTState objects with identical data but separate RNGs
+// so the two code paths are not serialized. Each state runs 1 warmup + 3
+// measured sweeps; we report min time across measured runs.
+//
+// Constraints for GPU path:
+//   - cfg.p_eval must be 0 (full feature set, no subsampling)
+//   - constant leaf only (no BCF z vector)
+// ---------------------------------------------------------------------------
+static void run_gfr_sweep_bench(gpu::MetalContext& ctx) {
+    printf("\n=== GFR sweep: bart::gfr_sweep vs gpu::gfr_sweep_gpu ===\n");
+
+    const int n      = 100000;
+    const int n_test = 0;
+
+    for (int p : {10, 20}) {
+        for (int T : {50, 200}) {
+            // Generate random training data.
+            std::mt19937 data_rng(123);
+            std::uniform_real_distribution<float> xdist(-1.f, 1.f);
+            std::normal_distribution<float>       ydist(0.f, 1.f);
+            std::vector<float> X(n * p), y(n);
+            for (auto& v : X) v = xdist(data_rng);
+            for (auto& v : y) v = ydist(data_rng);
+
+            bart::BARTConfig cfg;
+            cfg.num_trees      = T;
+            cfg.tree_depth     = 6;
+            cfg.leaf_prior_var = (0.5f * 0.5f) / T;
+            cfg.sigma2_shape   = 3.0f;
+            cfg.sigma2_scale   = 1.0f;
+            cfg.p_eval         = 0;  // GPU path requires full feature set
+
+            // CPU state
+            bart::RNG rng_cpu(42);
+            bart::BARTState cpu_state;
+            cpu_state.n  = n; cpu_state.p = p;
+            cpu_state.Xq = bart::quantize(X.data(), n, p);
+            cpu_state.y  = y.data();
+            bart::init_state(cpu_state, cfg, rng_cpu);
+            cpu_state.gfr_hist_ws.alloc(n, p, cpu_state.trees[0].full_size);
+
+            // GPU state — same data, different RNG seed for independence
+            bart::RNG rng_gpu(42);
+            bart::BARTState gpu_state;
+            gpu_state.n  = n; gpu_state.p = p;
+            gpu_state.Xq = bart::quantize(X.data(), n, p);
+            gpu_state.y  = y.data();
+            bart::init_state(gpu_state, cfg, rng_gpu);
+            gpu_state.gfr_hist_ws.alloc(n, p, gpu_state.trees[0].full_size);
+
+            // Warmup
+            bart::gfr_sweep(cpu_state, cfg, rng_cpu);
+            gpu::gfr_sweep_gpu(gpu_state, cfg, rng_gpu, ctx);
+
+            // Measured runs
+            const int N_RUNS = 3;
+            double best_cpu = 1e18, best_gpu = 1e18;
+            for (int i = 0; i < N_RUNS; i++) {
+                auto t0 = clk::now();
+                bart::gfr_sweep(cpu_state, cfg, rng_cpu);
+                best_cpu = std::min(best_cpu, us(clk::now() - t0).count());
+
+                t0 = clk::now();
+                gpu::gfr_sweep_gpu(gpu_state, cfg, rng_gpu, ctx);
+                best_gpu = std::min(best_gpu, us(clk::now() - t0).count());
+            }
+
+            printf("n=%d  p=%2d  T=%3d:  cpu=%8.0f µs  gpu=%8.0f µs  speedup=%5.2fx\n",
+                   n, p, T, best_cpu, best_gpu, best_cpu / best_gpu);
+        }
+    }
+    printf("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -222,6 +303,7 @@ int main() {
     std::mt19937 rng(42);
     run_single_node_sweep(ctx, rng);
     run_bfs_sweep(ctx, rng);
+    run_gfr_sweep_bench(ctx);
 
     return 0;
 }
