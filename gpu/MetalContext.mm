@@ -195,31 +195,33 @@ double MetalContext::noop_roundtrip_us() {
 }
 
 MetalContext::HistResult MetalContext::histogram_build(
-    const uint8_t* Xq, const float* resid, const int* obs_list,
-    int n, int p, int n_k,
+    const uint8_t* Xq, const float* resid,
+    const int* obs_list, const int* node_ranges,
+    int n, int p, int n_nodes,
     float* out_sum, int* out_cnt)
 {
     HistResult res;
     if (!impl_ || !impl_->hist_pso) return res;
 
+    // Compute total observations across all nodes.
+    int total_obs = 0;
+    for (int i = 0; i < n_nodes; i++) total_obs += node_ranges[2*i+1] - node_ranges[2*i];
+
     // All buffers use shared storage: no DMA copy on Apple Silicon.
-    // Input buffers are created from existing CPU data (one memcpy into MTLBuffer).
-    // This cost is intentionally excluded from timing — in a full integration
-    // these would be persistent GPU-resident buffers allocated once at startup.
+    // Buffer creation is intentionally excluded from timing — in a full
+    // integration these would be persistent GPU-resident buffers.
     auto shared_buf_from = [&](const void* src, size_t bytes) {
         return [impl_->device newBufferWithBytes:src
                                length:bytes
                                options:MTLResourceStorageModeShared];
     };
 
-    id<MTLBuffer> buf_Xq   = shared_buf_from(Xq,       (size_t)n * p  * sizeof(uint8_t));
-    id<MTLBuffer> buf_resid = shared_buf_from(resid,    (size_t)n      * sizeof(float));
-    id<MTLBuffer> buf_obs  = shared_buf_from(obs_list,  (size_t)n_k    * sizeof(int));
+    id<MTLBuffer> buf_Xq     = shared_buf_from(Xq,          (size_t)n * p    * sizeof(uint8_t));
+    id<MTLBuffer> buf_resid  = shared_buf_from(resid,        (size_t)n        * sizeof(float));
+    id<MTLBuffer> buf_obs    = shared_buf_from(obs_list,     (size_t)total_obs * sizeof(int));
+    id<MTLBuffer> buf_ranges = shared_buf_from(node_ranges,  (size_t)n_nodes * 2 * sizeof(int));
 
-    int ranges[2] = {0, n_k};
-    id<MTLBuffer> buf_ranges = shared_buf_from(ranges, sizeof(ranges));
-
-    const int out_elems = p * 256;
+    const int out_elems = n_nodes * p * 256;
     id<MTLBuffer> buf_sum = [impl_->device
         newBufferWithLength:(size_t)out_elems * sizeof(float)
         options:MTLResourceStorageModeShared];
@@ -233,17 +235,17 @@ MetalContext::HistResult MetalContext::histogram_build(
     id<MTLCommandBuffer>         cmd = [impl_->queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
     [enc setComputePipelineState:impl_->hist_pso];
-    [enc setBuffer:buf_Xq    offset:0 atIndex:0];
-    [enc setBuffer:buf_resid offset:0 atIndex:1];
-    [enc setBuffer:buf_obs   offset:0 atIndex:2];
+    [enc setBuffer:buf_Xq     offset:0 atIndex:0];
+    [enc setBuffer:buf_resid  offset:0 atIndex:1];
+    [enc setBuffer:buf_obs    offset:0 atIndex:2];
     [enc setBuffer:buf_ranges offset:0 atIndex:3];
-    [enc setBuffer:buf_sum   offset:0 atIndex:4];
-    [enc setBuffer:buf_cnt   offset:0 atIndex:5];
-    [enc setBytes:&n         length:sizeof(int) atIndex:6];
-    [enc setBytes:&p         length:sizeof(int) atIndex:7];
+    [enc setBuffer:buf_sum    offset:0 atIndex:4];
+    [enc setBuffer:buf_cnt    offset:0 atIndex:5];
+    [enc setBytes:&n          length:sizeof(int) atIndex:6];
+    [enc setBytes:&p          length:sizeof(int) atIndex:7];
 
-    // One threadgroup per feature; single node (y=1).
-    [enc dispatchThreadgroups:MTLSizeMake(p, 1, 1)
+    // Grid: (p features) x (n_nodes) threadgroups.
+    [enc dispatchThreadgroups:MTLSizeMake(p, n_nodes, 1)
        threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
     [enc endEncoding];
     [cmd commit];
@@ -255,9 +257,10 @@ MetalContext::HistResult MetalContext::histogram_build(
     res.gpu_kernel_us = (cmd.GPUEndTime - cmd.GPUStartTime) * 1e6;
     res.host_us = std::chrono::duration<double, std::micro>(host_t1 - host_t0).count();
 
-    // Shared buffers: contents pointer is direct CPU access, no copy needed.
-    memcpy(out_sum, [buf_sum contents], (size_t)out_elems * sizeof(float));
-    memcpy(out_cnt, [buf_cnt contents], (size_t)out_elems * sizeof(int));
+    if (out_sum)
+        memcpy(out_sum, [buf_sum contents], (size_t)out_elems * sizeof(float));
+    if (out_cnt)
+        memcpy(out_cnt, [buf_cnt contents], (size_t)out_elems * sizeof(int));
 
     return res;
 }

@@ -11,11 +11,12 @@
 
 // ---------------------------------------------------------------------------
 // CPU reference histogram build — matches the GFR inner loop exactly.
-// Output layout: sum[feat * 256 + bin], cnt[feat * 256 + bin]
+// Output layout: sum[(node*p + feat)*256 + bin], same as GPU.
 // ---------------------------------------------------------------------------
-static void cpu_histogram(const uint8_t* Xq, const float* resid,
-                          const int* obs_list, int n, int p, int n_k,
-                          float* sum, int* cnt)
+static void cpu_histogram_node(const uint8_t* Xq, const float* resid,
+                                const int* obs_list, int beg, int end,
+                                int n, int p,
+                                float* sum, int* cnt)
 {
     memset(sum, 0, p * 256 * sizeof(float));
     memset(cnt, 0, p * 256 * sizeof(int));
@@ -23,7 +24,7 @@ static void cpu_histogram(const uint8_t* Xq, const float* resid,
         const uint8_t* col = Xq + j * n;
         float* sh = sum + j * 256;
         int*   ch = cnt + j * 256;
-        for (int k = 0; k < n_k; k++) {
+        for (int k = beg; k < end; k++) {
             int obs = obs_list[k];
             sh[col[obs]] += resid[obs];
             ch[col[obs]]++;
@@ -34,28 +35,22 @@ static void cpu_histogram(const uint8_t* Xq, const float* resid,
 // ---------------------------------------------------------------------------
 // Timing helpers
 // ---------------------------------------------------------------------------
-using us_clock = std::chrono::high_resolution_clock;
-using us_t     = std::chrono::duration<double, std::micro>;
+using clk = std::chrono::high_resolution_clock;
+using us  = std::chrono::duration<double, std::micro>;
 
-static double elapsed_us(us_clock::time_point t0, us_clock::time_point t1) {
-    return us_t(t1 - t0).count();
-}
-
-// Run fn() N times, return minimum elapsed microseconds.
 template<typename Fn>
 static double min_time_us(int N, Fn fn) {
     double best = 1e18;
     for (int i = 0; i < N; i++) {
-        auto t0 = us_clock::now();
+        auto t0 = clk::now();
         fn();
-        auto t1 = us_clock::now();
-        best = std::min(best, elapsed_us(t0, t1));
+        best = std::min(best, us(clk::now() - t0).count());
     }
     return best;
 }
 
 // ---------------------------------------------------------------------------
-// Noop section
+// Section 1: noop roundtrip
 // ---------------------------------------------------------------------------
 static void run_noop_bench(gpu::MetalContext& ctx) {
     printf("--- warmup (includes shader compile) ---\n");
@@ -66,71 +61,147 @@ static void run_noop_bench(gpu::MetalContext& ctx) {
 }
 
 // ---------------------------------------------------------------------------
-// Histogram benchmark — one scenario
+// Section 2: single-node histogram sweep (Phase 1 baseline)
 // ---------------------------------------------------------------------------
-static void run_histogram_scenario(gpu::MetalContext& ctx,
-                                   int n_k, int p,
-                                   std::mt19937& rng)
-{
-    const int n = n_k;  // single root node owns all observations
+static void run_single_node_sweep(gpu::MetalContext& ctx, std::mt19937& rng) {
+    printf("\n=== histogram build: single node, varying n_k and p ===\n");
+    printf("1 warmup + 5 measured runs. CPU = min of 5.\n");
+    printf("kernel_speedup = cpu / gpu_kernel   host_speedup = cpu / gpu_host\n\n");
 
-    // Generate synthetic data.
-    std::vector<uint8_t> Xq(n * p);
-    std::vector<float>   resid(n);
-    std::vector<int>     obs_list(n_k);
+    for (int n_k : {1000, 10000, 100000}) {
+        for (int p : {10, 50, 100}) {
+            const int n = n_k;
+            std::vector<uint8_t> Xq(n * p);
+            std::vector<float>   resid(n);
+            std::vector<int>     obs_list(n_k);
+            std::uniform_int_distribution<int> udist(0, 255);
+            std::normal_distribution<float>    ndist(0.f, 1.f);
+            for (auto& v : Xq)    v = (uint8_t)udist(rng);
+            for (auto& v : resid) v = ndist(rng);
+            std::iota(obs_list.begin(), obs_list.end(), 0);
 
-    std::uniform_int_distribution<int> udist(0, 255);
-    std::normal_distribution<float>    ndist(0.f, 1.f);
+            std::vector<float> cpu_sum(p * 256), gpu_sum(p * 256);
+            std::vector<int>   cpu_cnt(p * 256), gpu_cnt(p * 256);
 
-    for (auto& v : Xq)    v = (uint8_t)udist(rng);
-    for (auto& v : resid) v = ndist(rng);
-    std::iota(obs_list.begin(), obs_list.end(), 0);
+            double cpu_us = min_time_us(5, [&]{
+                cpu_histogram_node(Xq.data(), resid.data(), obs_list.data(),
+                                   0, n_k, n, p, cpu_sum.data(), cpu_cnt.data());
+            });
 
-    const int hist_elems = p * 256;
-    std::vector<float> cpu_sum(hist_elems), gpu_sum(hist_elems);
-    std::vector<int>   cpu_cnt(hist_elems), gpu_cnt(hist_elems);
+            int ranges[2] = {0, n_k};
+            // warmup
+            ctx.histogram_build(Xq.data(), resid.data(), obs_list.data(), ranges,
+                                 n, p, 1, gpu_sum.data(), gpu_cnt.data());
+            double best_k = 1e18, best_h = 1e18;
+            for (int i = 0; i < 5; i++) {
+                auto r = ctx.histogram_build(Xq.data(), resid.data(), obs_list.data(),
+                                             ranges, n, p, 1,
+                                             gpu_sum.data(), gpu_cnt.data());
+                if (r.gpu_kernel_us < best_k) { best_k = r.gpu_kernel_us; best_h = r.host_us; }
+            }
 
-    // CPU: time over 5 runs, take min.
-    double cpu_us = min_time_us(5, [&]{
-        cpu_histogram(Xq.data(), resid.data(), obs_list.data(),
-                      n, p, n_k, cpu_sum.data(), cpu_cnt.data());
-    });
+            float max_diff = 0.f; int cnt_fail = 0;
+            for (int i = 0; i < p * 256; i++) {
+                max_diff = std::max(max_diff, std::abs(gpu_sum[i] - cpu_sum[i]));
+                if (gpu_cnt[i] != cpu_cnt[i]) cnt_fail++;
+            }
 
-    // GPU: 1 warmup + 5 measured, take min kernel and corresponding host time.
-    // Warmup here is per-scenario (not the initial shader compile warmup).
-    ctx.histogram_build(Xq.data(), resid.data(), obs_list.data(),
-                        n, p, n_k, gpu_sum.data(), gpu_cnt.data());
-
-    double best_kernel = 1e18, best_host = 1e18;
-    for (int i = 0; i < 5; i++) {
-        auto r = ctx.histogram_build(Xq.data(), resid.data(), obs_list.data(),
-                                     n, p, n_k, gpu_sum.data(), gpu_cnt.data());
-        if (r.gpu_kernel_us < best_kernel) {
-            best_kernel = r.gpu_kernel_us;
-            best_host   = r.host_us;
+            printf("n_k=%7d  p=%3d:  cpu=%6.0f µs  gpu_kernel=%5.0f µs"
+                   "  host=%6.0f µs  kernel=%4.1fx  host=%4.2fx"
+                   "  diff=%.2e  cnt=%s\n",
+                   n_k, p, cpu_us, best_k, best_h,
+                   cpu_us / best_k, cpu_us / best_h,
+                   max_diff, cnt_fail == 0 ? "ok" : "FAIL");
         }
+        printf("\n");
     }
+}
 
-    // Correctness: max abs diff in sums (float order differs), exact match for counts.
-    float max_diff = 0.f;
-    int   cnt_fail = 0;
-    for (int i = 0; i < hist_elems; i++) {
-        max_diff = std::max(max_diff, std::abs(gpu_sum[i] - cpu_sum[i]));
-        if (gpu_cnt[i] != cpu_cnt[i]) cnt_fail++;
+// ---------------------------------------------------------------------------
+// Section 3: BFS-level sweep — find the GPU/CPU crossover depth
+//
+// Simulates a balanced tree at each BFS depth:
+//   depth d → 2^d nodes, each with n/2^d observations.
+// All nodes at a depth are dispatched in ONE GPU command buffer.
+// CPU time is the sum over nodes (sequential, as in the real GFR loop).
+// ---------------------------------------------------------------------------
+static void run_bfs_sweep(gpu::MetalContext& ctx, std::mt19937& rng) {
+    printf("\n=== BFS-level histogram: batched GPU dispatch vs sequential CPU ===\n");
+    printf("n=100000, balanced tree (n_k halves each depth). 1 warmup + 5 runs.\n");
+    printf("GPU dispatches ALL nodes at a depth in one command buffer.\n");
+    printf("CPU runs nodes sequentially (as in grow_tree_gfr).\n\n");
+
+    // Fixed n; 100000 divides cleanly through depth 5 (100000 / 32 = 3125).
+    const int n = 100000;
+    const int max_depth = 5;
+
+    for (int p : {10, 50, 100}) {
+        // Generate dataset once for this (n, p).
+        std::vector<uint8_t> Xq(n * p);
+        std::vector<float>   resid(n);
+        std::vector<int>     obs_list(n);  // identity permutation
+        std::uniform_int_distribution<int> udist(0, 255);
+        std::normal_distribution<float>    ndist(0.f, 1.f);
+        for (auto& v : Xq)    v = (uint8_t)udist(rng);
+        for (auto& v : resid) v = ndist(rng);
+        std::iota(obs_list.begin(), obs_list.end(), 0);
+
+        printf("p=%3d\n", p);
+        printf("  depth  nodes  n_k/node  cpu_level  gpu_kernel  gpu_host"
+               "  kernel_spdup  host_spdup  verdict\n");
+
+        for (int d = 0; d <= max_depth; d++) {
+            int n_nodes = 1 << d;          // 2^d
+            int n_k     = n / n_nodes;     // obs per node (balanced)
+
+            // Build node_ranges: [{0,n_k}, {n_k,2*n_k}, ..., {(nodes-1)*n_k, n}]
+            std::vector<int> node_ranges(n_nodes * 2);
+            for (int i = 0; i < n_nodes; i++) {
+                node_ranges[2*i]   = i * n_k;
+                node_ranges[2*i+1] = (i == n_nodes - 1) ? n : (i+1) * n_k;
+            }
+
+            // Output buffers (contents not verified — we only need timing here).
+            std::vector<float> gpu_sum(n_nodes * p * 256);
+            std::vector<int>   gpu_cnt(n_nodes * p * 256);
+            std::vector<float> cpu_sum(p * 256);
+            std::vector<int>   cpu_cnt(p * 256);
+
+            // CPU: run each node sequentially, accumulate total time.
+            double cpu_level_us = min_time_us(5, [&]{
+                for (int i = 0; i < n_nodes; i++) {
+                    int beg = node_ranges[2*i], end = node_ranges[2*i+1];
+                    cpu_histogram_node(Xq.data(), resid.data(), obs_list.data(),
+                                       beg, end, n, p,
+                                       cpu_sum.data(), cpu_cnt.data());
+                }
+            });
+
+            // GPU: one batched dispatch for all nodes at this depth.
+            // Warmup first.
+            ctx.histogram_build(Xq.data(), resid.data(), obs_list.data(),
+                                 node_ranges.data(), n, p, n_nodes,
+                                 nullptr, nullptr);
+            double best_k = 1e18, best_h = 1e18;
+            for (int i = 0; i < 5; i++) {
+                auto r = ctx.histogram_build(Xq.data(), resid.data(), obs_list.data(),
+                                             node_ranges.data(), n, p, n_nodes,
+                                             nullptr, nullptr);
+                if (r.gpu_kernel_us < best_k) { best_k = r.gpu_kernel_us; best_h = r.host_us; }
+            }
+
+            double k_spdup = cpu_level_us / best_k;
+            double h_spdup = cpu_level_us / best_h;
+            const char* verdict = h_spdup >= 1.0 ? "GPU wins" : "CPU wins";
+
+            printf("  d=%d    %4d   %7d   %7.0f µs  %7.0f µs  %7.0f µs"
+                   "     %5.2fx       %5.2fx   %s\n",
+                   d, n_nodes, n_k,
+                   cpu_level_us, best_k, best_h,
+                   k_spdup, h_spdup, verdict);
+        }
+        printf("\n");
     }
-
-    // Speedup relative to GPU host roundtrip (the practical number).
-    double speedup_host   = cpu_us / best_host;
-    double speedup_kernel = cpu_us / best_kernel;
-
-    printf("n_k=%7d  p=%3d:  cpu=%6.0f µs  gpu_kernel=%5.0f µs"
-           "  host=%6.0f µs  kernel_speedup=%4.1fx  host_speedup=%4.2fx"
-           "  diff=%.2e  cnt=%s\n",
-           n_k, p,
-           cpu_us, best_kernel, best_host,
-           speedup_kernel, speedup_host,
-           max_diff,
-           cnt_fail == 0 ? "ok" : "FAIL");
 }
 
 // ---------------------------------------------------------------------------
@@ -148,19 +219,9 @@ int main() {
 
     run_noop_bench(ctx);
 
-    printf("\n=== histogram build (single node, CPU vs GPU) ===\n");
-    printf("Each scenario: 1 warmup + 5 measured runs; CPU = min of 5.\n");
-    printf("kernel_speedup = cpu / gpu_kernel   (ignores dispatch overhead)\n");
-    printf("host_speedup   = cpu / gpu_host     (practical wall-clock)\n\n");
-
     std::mt19937 rng(42);
-
-    for (int n_k : {1000, 10000, 100000}) {
-        for (int p : {10, 50, 100}) {
-            run_histogram_scenario(ctx, n_k, p, rng);
-        }
-        printf("\n");
-    }
+    run_single_node_sweep(ctx, rng);
+    run_bfs_sweep(ctx, rng);
 
     return 0;
 }
