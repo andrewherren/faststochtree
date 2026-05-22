@@ -26,6 +26,9 @@ target_link_libraries(faststochtree_bart_bench PRIVATE faststochtree)
 add_executable(faststochtree_bcf_bench bench/bcf_bench.cpp)
 target_link_libraries(faststochtree_bcf_bench PRIVATE faststochtree)
 
+add_executable(cpu_profile bench/cpu_profile.cpp)
+target_link_libraries(cpu_profile PRIVATE faststochtree)
+
 # Tests
 enable_testing()
 
