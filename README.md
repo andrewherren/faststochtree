@@ -140,6 +140,56 @@ To benchmark all three BCF modes:
 ./build-release/faststochtree_bcf_bench --mode warmstart_bcf --iters 5
 ```
 
+### GPU dispatch benchmark — `gpu_bench` (experimental, macOS only)
+
+> **Branch:** `gpu_exploratory`. This target is not built by default.
+
+Measures Metal command buffer roundtrip latency by dispatching a no-op kernel
+and reporting both the GPU hardware execution time and the host-side wall-clock
+time separately. This establishes the baseline dispatch overhead that any real
+GPU kernel must amortise.
+
+**Prerequisites:** macOS with Xcode command-line tools installed (`xcode-select --install`). Apple Silicon recommended; any Metal-capable Mac works.
+
+Configure with `-DGPU_METAL=ON`:
+
+```bash
+cmake -S . -B build-gpu -DCMAKE_BUILD_TYPE=Release -DGPU_METAL=ON
+cmake --build build-gpu --target gpu_bench
+```
+
+Run:
+
+```bash
+./build-gpu/gpu/gpu_bench
+```
+
+Expected output (numbers will vary by machine and system load):
+
+```
+=== faststochtree GPU bench ===
+
+Device: Apple M1 Max
+
+--- warmup (includes shader compile) ---
+  noop: gpu=14.0 µs  host_roundtrip=869.0 µs
+
+--- noop kernel roundtrip (5 runs) ---
+  noop: gpu=8.4 µs  host_roundtrip=233.6 µs
+  noop: gpu=8.5 µs  host_roundtrip=230.2 µs
+  noop: gpu=8.6 µs  host_roundtrip=219.2 µs
+  ...
+```
+
+The warmup dispatch is slow because `MetalContext` compiles the Metal shader
+source at runtime on first use (~700–900 µs one-time cost). Subsequent
+dispatches show the steady-state overhead: ~8–9 µs of actual GPU kernel
+execution and ~170–240 µs of host roundtrip (encoding + driver submission +
+GPU command-processor pickup + completion signal). The GPU kernel time is
+stable across runs; the host roundtrip varies with OS scheduler state. See
+`.claude/GPU_DISPATCH_LATENCY.md` for a detailed breakdown of where that
+overhead goes.
+
 ---
 
 ## Benchmark suite — `bench/run_rmse_experiment.sh`
