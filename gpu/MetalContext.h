@@ -29,37 +29,40 @@ struct MetalContext {
         double host_us       = -1.0;  // host wall-clock (encode+submit+wait)
     };
 
-    // Build p x 256 sum/count histograms for n_nodes nodes in one dispatch.
+    // Build m x 256 sum/count histograms for n_nodes nodes in one dispatch.
     //
     // Xq          [n * p]         column-major uint8 quantized covariates
     // resid       [n]             partial residuals
     // obs_list    [obs_count]     observation indices; ranges index into this array
     // obs_count                   number of valid elements in obs_list
     // node_ranges [n_nodes * 2]   {beg, end} pairs into obs_list, one per node
-    // out_sum     [n_nodes*p*256] sum histograms — written on return
-    // out_cnt     [n_nodes*p*256] count histograms — written on return
+    // m                           features evaluated per node (≤ p)
+    // feat_order  [n_nodes * m]   per-node feature permutation; nullptr when m == p
+    // out_sum     [n_nodes*m*256] sum histograms — written on return
+    // out_cnt     [n_nodes*m*256] count histograms — written on return
     //
-    // Output layout: out_sum[(node * p + feat) * 256 + bin]
-    // Single-node convenience: pass node_ranges = {0, n_k} and n_nodes = 1.
-    // obs_count must cover the maximum end index in node_ranges.
+    // Output layout: out_sum[(node * m + feat_slot) * 256 + bin]
     HistResult histogram_build(const uint8_t* Xq, const float* resid,
                                const int* obs_list, int obs_count,
                                const int* node_ranges,
                                int n, int p, int n_nodes,
+                               int m, const int* feat_order,
                                float* out_sum, int* out_cnt);
 
     // Two-pass variant: histogram_build followed by scan_feat_log_total in one
     // MTLCommandBuffer. The implicit GPU barrier between compute encoders
     // guarantees histogram writes are visible to the scan pass.
     //
+    // m, feat_order: same semantics as histogram_build above.
     // sigma2, tau, min_samples_leaf: GFR split-scoring parameters for the scan.
-    // out_feat_log [n_nodes * p]: log-sum-exp over valid split log-weights per
-    //   (node, feature) pair. Layout: out_feat_log[node * p + feat].
+    // out_feat_log [n_nodes * m]: log-sum-exp over valid split log-weights per
+    //   (node, feature-slot) pair. Layout: out_feat_log[node * m + feat_slot].
     // gpu_kernel_us covers both passes combined.
     HistResult histogram_and_scan(const uint8_t* Xq, const float* resid,
                                   const int* obs_list, int obs_count,
                                   const int* node_ranges,
                                   int n, int p, int n_nodes,
+                                  int m, const int* feat_order,
                                   float sigma2, float tau, int min_samples_leaf,
                                   float* out_sum, int* out_cnt,
                                   float* out_feat_log);

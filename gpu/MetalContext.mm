@@ -64,15 +64,21 @@ kernel void histogram_build(
     device const float*   residuals    [[buffer(1)]],  // [n]
     device const int*     obs_list     [[buffer(2)]],  // [sum of node n_k values]
     device const int*     node_ranges  [[buffer(3)]],  // [n_nodes * 2]: {beg, end}
-    device       float*   sum_hists    [[buffer(4)]],  // [n_nodes * p * 256]
-    device       int*     cnt_hists    [[buffer(5)]],  // [n_nodes * p * 256]
+    device       float*   sum_hists    [[buffer(4)]],  // [n_nodes * m * 256]
+    device       int*     cnt_hists    [[buffer(5)]],  // [n_nodes * m * 256]
     constant     int&     n_total      [[buffer(6)]],  // total obs in dataset
-    constant     int&     p_total      [[buffer(7)]],  // total features
+    constant     int&     m_total      [[buffer(7)]],  // features evaluated per node (≤ p)
+    device const int*     feat_order   [[buffer(8)]],  // [n_nodes * m_total]; nil when m == p
     uint2 tg_pos  [[threadgroup_position_in_grid]],
     uint  tid     [[thread_index_in_threadgroup]]
 ) {
-    const uint feat = tg_pos.x;
+    const uint fi   = tg_pos.x;  // feature slot in [0, m_total)
     const uint node = tg_pos.y;
+
+    // Map fi → actual feature column (identity when feat_order is nil).
+    const uint feat_actual = (feat_order != nullptr)
+        ? (uint)feat_order[node * (uint)m_total + fi]
+        : fi;
 
     const int beg = node_ranges[node * 2];
     const int end = node_ranges[node * 2 + 1];
@@ -91,7 +97,7 @@ kernel void histogram_build(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // Phase 2: scatter over observations in this node.
-    const device uint8_t* col = Xq + (int)feat * n_total;
+    const device uint8_t* col = Xq + (int)feat_actual * n_total;
     for (int k = beg + (int)tid; k < end; k += (int)HIST_TG_SIZE) {
         const int   obs = obs_list[k];
         const uint  bin = col[obs];
@@ -102,7 +108,7 @@ kernel void histogram_build(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // Phase 3: write local histogram to global memory.
-    const uint out_base = (node * (uint)p_total + feat) * 256u;
+    const uint out_base = (node * (uint)m_total + fi) * 256u;
     for (uint b = b0; b < b0 + bpt; b++) {
         sum_hists[out_base + b] = as_type<float>(
             atomic_load_explicit(&sum_bits[b], memory_order_relaxed));
@@ -127,25 +133,23 @@ kernel void histogram_build(
 // Output: feat_log[node * p + feat]
 
 kernel void scan_feat_log_total(
-    device const float* sum_hists [[buffer(0)]],  // [n_nodes * p * 256]
-    device const int*   cnt_hists [[buffer(1)]],  // [n_nodes * p * 256]
-    device       float* feat_log  [[buffer(2)]],  // [n_nodes * p]
+    device const float* sum_hists [[buffer(0)]],  // [n_nodes * m * 256]
+    device const int*   cnt_hists [[buffer(1)]],  // [n_nodes * m * 256]
+    device       float* feat_log  [[buffer(2)]],  // [n_nodes * m]
     constant     float& sigma2    [[buffer(3)]],
     constant     float& tau       [[buffer(4)]],
     constant     int&   min_leaf  [[buffer(5)]],
-    constant     int&   p_total   [[buffer(6)]],
+    constant     int&   m_total   [[buffer(6)]],  // features evaluated per node
     uint2 tg_pos [[threadgroup_position_in_grid]]
 ) {
-    const uint feat = tg_pos.x;
+    const uint fi   = tg_pos.x;  // feature slot in [0, m_total)
     const uint node = tg_pos.y;
 
-    const uint base = (node * (uint)p_total + feat) * 256u;
+    const uint base = (node * (uint)m_total + fi) * 256u;
     const device float* sh = sum_hists + base;
     const device int*   ch = cnt_hists + base;
 
-    // Compute node totals from this feature's 256-bin histogram.
-    // Every feature's histogram sums to the same node total, so this is
-    // redundant across features but trivially parallelisable.
+    // Compute node totals from this feature slot's histogram.
     float sum_T = 0.f; int count_T = 0;
     for (uint b = 0u; b < 256u; b++) { sum_T += sh[b]; count_T += ch[b]; }
 
@@ -164,7 +168,7 @@ kernel void scan_feat_log_total(
         else                 lse += exp(lml - max_lw);
     }
 
-    feat_log[node * (uint)p_total + feat] = (lse > 0.f) ? (max_lw + log(lse)) : -INFINITY;
+    feat_log[node * (uint)m_total + fi] = (lse > 0.f) ? (max_lw + log(lse)) : -INFINITY;
 }
 )MSL";
 // ---------------------------------------------------------------------------
@@ -262,14 +266,12 @@ MetalContext::HistResult MetalContext::histogram_build(
     const uint8_t* Xq, const float* resid,
     const int* obs_list, int obs_count, const int* node_ranges,
     int n, int p, int n_nodes,
+    int m, const int* feat_order,
     float* out_sum, int* out_cnt)
 {
     HistResult res;
     if (!impl_ || !impl_->hist_pso) return res;
 
-    // All buffers use shared storage: no DMA copy on Apple Silicon.
-    // Buffer creation is intentionally excluded from timing — in a full
-    // integration these would be persistent GPU-resident buffers.
     auto shared_buf_from = [&](const void* src, size_t bytes) {
         return [impl_->device newBufferWithBytes:src
                                length:bytes
@@ -280,8 +282,11 @@ MetalContext::HistResult MetalContext::histogram_build(
     id<MTLBuffer> buf_resid  = shared_buf_from(resid,        (size_t)n           * sizeof(float));
     id<MTLBuffer> buf_obs    = shared_buf_from(obs_list,     (size_t)obs_count   * sizeof(int));
     id<MTLBuffer> buf_ranges = shared_buf_from(node_ranges,  (size_t)n_nodes * 2 * sizeof(int));
+    id<MTLBuffer> buf_fo     = feat_order
+        ? shared_buf_from(feat_order, (size_t)n_nodes * m * sizeof(int))
+        : nil;
 
-    const int out_elems = n_nodes * p * 256;
+    const int out_elems = n_nodes * m * 256;
     id<MTLBuffer> buf_sum = [impl_->device
         newBufferWithLength:(size_t)out_elems * sizeof(float)
         options:MTLResourceStorageModeShared];
@@ -302,10 +307,11 @@ MetalContext::HistResult MetalContext::histogram_build(
     [enc setBuffer:buf_sum    offset:0 atIndex:4];
     [enc setBuffer:buf_cnt    offset:0 atIndex:5];
     [enc setBytes:&n          length:sizeof(int) atIndex:6];
-    [enc setBytes:&p          length:sizeof(int) atIndex:7];
+    [enc setBytes:&m          length:sizeof(int) atIndex:7];
+    [enc setBuffer:buf_fo     offset:0 atIndex:8];
 
-    // Grid: (p features) x (n_nodes) threadgroups.
-    [enc dispatchThreadgroups:MTLSizeMake(p, n_nodes, 1)
+    // Grid: (m feature slots) x (n_nodes) threadgroups.
+    [enc dispatchThreadgroups:MTLSizeMake(m, n_nodes, 1)
        threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
     [enc endEncoding];
     [cmd commit];
@@ -329,6 +335,7 @@ MetalContext::HistResult MetalContext::histogram_and_scan(
     const uint8_t* Xq, const float* resid,
     const int* obs_list, int obs_count, const int* node_ranges,
     int n, int p, int n_nodes,
+    int m, const int* feat_order,
     float sigma2, float tau, int min_samples_leaf,
     float* out_sum, int* out_cnt, float* out_feat_log)
 {
@@ -345,9 +352,12 @@ MetalContext::HistResult MetalContext::histogram_and_scan(
     id<MTLBuffer> buf_resid  = shared_buf_from(resid,       (size_t)n           * sizeof(float));
     id<MTLBuffer> buf_obs    = shared_buf_from(obs_list,    (size_t)obs_count   * sizeof(int));
     id<MTLBuffer> buf_ranges = shared_buf_from(node_ranges, (size_t)n_nodes * 2 * sizeof(int));
+    id<MTLBuffer> buf_fo     = feat_order
+        ? shared_buf_from(feat_order, (size_t)n_nodes * m * sizeof(int))
+        : nil;
 
-    const int hist_elems = n_nodes * p * 256;
-    const int log_elems  = n_nodes * p;
+    const int hist_elems = n_nodes * m * 256;
+    const int log_elems  = n_nodes * m;
 
     id<MTLBuffer> buf_sum = [impl_->device
         newBufferWithLength:(size_t)hist_elems * sizeof(float)
@@ -375,8 +385,9 @@ MetalContext::HistResult MetalContext::histogram_and_scan(
         [enc setBuffer:buf_sum    offset:0 atIndex:4];
         [enc setBuffer:buf_cnt    offset:0 atIndex:5];
         [enc setBytes:&n          length:sizeof(int) atIndex:6];
-        [enc setBytes:&p          length:sizeof(int) atIndex:7];
-        [enc dispatchThreadgroups:MTLSizeMake(p, n_nodes, 1)
+        [enc setBytes:&m          length:sizeof(int) atIndex:7];
+        [enc setBuffer:buf_fo     offset:0 atIndex:8];
+        [enc dispatchThreadgroups:MTLSizeMake(m, n_nodes, 1)
            threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
         [enc endEncoding];  // implicit GPU barrier: scan pass waits for histogram writes
     }
@@ -391,8 +402,8 @@ MetalContext::HistResult MetalContext::histogram_and_scan(
         [enc setBytes:&sigma2          length:sizeof(float) atIndex:3];
         [enc setBytes:&tau             length:sizeof(float) atIndex:4];
         [enc setBytes:&min_samples_leaf length:sizeof(int)  atIndex:5];
-        [enc setBytes:&p               length:sizeof(int)   atIndex:6];
-        [enc dispatchThreadgroups:MTLSizeMake(p, n_nodes, 1)
+        [enc setBytes:&m               length:sizeof(int)   atIndex:6];
+        [enc dispatchThreadgroups:MTLSizeMake(m, n_nodes, 1)
            threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
         [enc endEncoding];
     }

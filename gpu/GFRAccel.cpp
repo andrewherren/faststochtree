@@ -36,13 +36,15 @@ void grow_tree_gfr_gpu(bart::Tree& tree, const bart::QuantizedX& Xq,
 {
     tree.reset();
     ws.reinit(n);
-    const int m = p;  // no feature subsampling (p_eval == 0 required)
+    const int m = (cfg.p_eval > 0 && cfg.p_eval < p) ? cfg.p_eval : p;
 
     const float NEG_INF = -std::numeric_limits<float>::infinity();
 
     std::vector<float> gpu_sum;
     std::vector<int>   gpu_cnt;
     std::vector<float> gpu_feat_log;
+    std::vector<int>   node_feat_orders;  // [n_active * m] per BFS level
+    std::vector<int>   feat_idx(p);       // Fisher-Yates workspace
 
     std::vector<int> current_level = {1};
 
@@ -80,9 +82,26 @@ void grow_tree_gfr_gpu(bart::Tree& tree, const bart::QuantizedX& Xq,
             node_ranges_buf[2*ai]   = active[ai].beg;
             node_ranges_buf[2*ai+1] = active[ai].end;
         }
-        gpu_sum.resize((size_t)n_active * p * 256);
-        gpu_cnt.resize((size_t)n_active * p * 256);
-        gpu_feat_log.resize((size_t)n_active * p);
+
+        // Fisher-Yates: generate per-node feature orderings before GPU dispatch.
+        const int* feat_order_ptr = nullptr;
+        if (m < p) {
+            node_feat_orders.resize(n_active * m);
+            for (int ai = 0; ai < n_active; ai++) {
+                std::iota(feat_idx.begin(), feat_idx.end(), 0);
+                for (int k = 0; k < m; k++) {
+                    int j = k + rng.randint(0, p - k);  // swap position k with [k, p)
+                    std::swap(feat_idx[k], feat_idx[j]);
+                }
+                std::copy(feat_idx.begin(), feat_idx.begin() + m,
+                          node_feat_orders.data() + ai * m);
+            }
+            feat_order_ptr = node_feat_orders.data();
+        }
+
+        gpu_sum.resize((size_t)n_active * m * 256);
+        gpu_cnt.resize((size_t)n_active * m * 256);
+        gpu_feat_log.resize((size_t)n_active * m);
 
         // Two-pass dispatch: histogram then scan in one MTLCommandBuffer.
         // obs_count = n so flat_obs ranges index into the full array absolutely.
@@ -90,6 +109,7 @@ void grow_tree_gfr_gpu(bart::Tree& tree, const bart::QuantizedX& Xq,
             Xq.data.data(), resid,
             ws.flat_obs.data(), n,
             node_ranges_buf.data(), n, p, n_active,
+            m, feat_order_ptr,
             sigma2, cfg.leaf_prior_var, cfg.min_samples_leaf,
             gpu_sum.data(), gpu_cnt.data(), gpu_feat_log.data());
 
@@ -100,10 +120,10 @@ void grow_tree_gfr_gpu(bart::Tree& tree, const bart::QuantizedX& Xq,
             int end    = active[ai].end;
             int depth  = bart::Tree::depth_of(node_k);
 
-            const float* node_sum = gpu_sum.data() + (size_t)ai * p * 256;
-            const int*   node_cnt = gpu_cnt.data() + (size_t)ai * p * 256;
+            const float* node_sum = gpu_sum.data() + (size_t)ai * m * 256;
+            const int*   node_cnt = gpu_cnt.data() + (size_t)ai * m * 256;
 
-            // Derive sum_T / count_T from feature 0's histogram (Σ bins = node total).
+            // Derive sum_T / count_T from feature slot 0's histogram (Σ bins = node total).
             float sum_T = 0.f; int count_T = 0;
             for (int b = 0; b < 256; b++) { sum_T += node_sum[b]; count_T += node_cnt[b]; }
 
@@ -114,7 +134,7 @@ void grow_tree_gfr_gpu(bart::Tree& tree, const bart::QuantizedX& Xq,
             float log_split_ratio = std::log(p_split) - std::log(1.f - p_split);
 
             // feat_log_total[0..m-1] already computed by the GPU scan kernel.
-            const float* node_feat_log = gpu_feat_log.data() + ai * p;
+            const float* node_feat_log = gpu_feat_log.data() + ai * m;
             for (int fi = 0; fi < m; fi++)
                 ws.feat_log_total[fi] = node_feat_log[fi];
 
@@ -142,9 +162,10 @@ void grow_tree_gfr_gpu(bart::Tree& tree, const bart::QuantizedX& Xq,
                 ws.node_range[node_k].first = -1;
                 continue;
             }
-            int chosen_feat = chosen_fi;  // identity feat_order: fi == feature index
+            // Map feature slot → actual column (identity when m == p).
+            int chosen_feat = (m < p) ? node_feat_orders[ai * m + chosen_fi] : chosen_fi;
 
-            // Stage 2: cutpoint softmax over chosen feature's GPU histogram.
+            // Stage 2: cutpoint softmax over chosen feature slot's GPU histogram.
             ws.cut_log_wts.clear();
             ws.cut_thresh_buf.clear();
             {
@@ -181,7 +202,7 @@ void grow_tree_gfr_gpu(bart::Tree& tree, const bart::QuantizedX& Xq,
 
             tree.grow(node_k, chosen_feat, thresh);
 
-            // Scalar partition (compress8 is in gfr.cpp anonymous namespace).
+            // Partition obs using the actual feature column.
             const uint8_t* col = Xq.data.data() + chosen_feat * Xq.n;
             ws.right_buf.clear();
             int write = beg;

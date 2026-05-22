@@ -95,12 +95,12 @@ static void run_single_node_sweep(gpu::MetalContext& ctx, std::mt19937& rng) {
             int ranges[2] = {0, n_k};
             // warmup
             ctx.histogram_build(Xq.data(), resid.data(), obs_list.data(), n_k, ranges,
-                                 n, p, 1, gpu_sum.data(), gpu_cnt.data());
+                                 n, p, 1, p, nullptr, gpu_sum.data(), gpu_cnt.data());
             double best_k = 1e18, best_h = 1e18;
             for (int i = 0; i < 5; i++) {
                 auto r = ctx.histogram_build(Xq.data(), resid.data(), obs_list.data(),
                                              n_k, ranges, n, p, 1,
-                                             gpu_sum.data(), gpu_cnt.data());
+                                             p, nullptr, gpu_sum.data(), gpu_cnt.data());
                 if (r.gpu_kernel_us < best_k) { best_k = r.gpu_kernel_us; best_h = r.host_us; }
             }
 
@@ -185,12 +185,12 @@ static void run_bfs_sweep(gpu::MetalContext& ctx, std::mt19937& rng) {
             // Warmup first.
             ctx.histogram_build(Xq.data(), resid.data(), obs_list.data(), n,
                                  node_ranges.data(), n, p, n_nodes,
-                                 nullptr, nullptr);
+                                 p, nullptr, nullptr, nullptr);
             double best_k = 1e18, best_h = 1e18;
             for (int i = 0; i < 5; i++) {
                 auto r = ctx.histogram_build(Xq.data(), resid.data(), obs_list.data(),
                                              n, node_ranges.data(), n, p, n_nodes,
-                                             nullptr, nullptr);
+                                             p, nullptr, nullptr, nullptr);
                 if (r.gpu_kernel_us < best_k) { best_k = r.gpu_kernel_us; best_h = r.host_us; }
             }
 
@@ -216,7 +216,6 @@ static void run_bfs_sweep(gpu::MetalContext& ctx, std::mt19937& rng) {
 // measured sweeps; we report min time across measured runs.
 //
 // Constraints for GPU path:
-//   - cfg.p_eval must be 0 (full feature set, no subsampling)
 //   - constant leaf only (no BCF z vector)
 // ---------------------------------------------------------------------------
 static void run_gfr_sweep_bench(gpu::MetalContext& ctx) {
@@ -241,7 +240,7 @@ static void run_gfr_sweep_bench(gpu::MetalContext& ctx) {
             cfg.leaf_prior_var = (0.5f * 0.5f) / T;
             cfg.sigma2_shape   = 3.0f;
             cfg.sigma2_scale   = 1.0f;
-            cfg.p_eval         = 0;  // GPU path requires full feature set
+            cfg.p_eval         = 0;
 
             // CPU state
             bart::RNG rng_cpu(42);
