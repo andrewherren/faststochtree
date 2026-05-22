@@ -1,11 +1,13 @@
 #include "GFRAccel.h"
 #include "faststochtree/model.hpp"
 #include "faststochtree/mcmc.hpp"
+#include "faststochtree/quantize.hpp"
 #include <algorithm>
 #include <climits>
 #include <cmath>
 #include <limits>
 #include <numeric>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -225,6 +227,151 @@ void gfr_sweep_gpu(bart::BARTState& state, const bart::BARTConfig& cfg,
         for (int i = 0; i < n; i++) state.residual[i] -= state.pred[t][i];
     }
     bart::sample_sigma2(state.residual.data(), n, state.sigma2, cfg, rng);
+}
+
+// ── High-level fit functions ─────────────────────────────────────────────────
+
+namespace {
+
+static bart::BARTModel assemble_bart_model(
+    std::vector<std::vector<float>>& test_vecs,
+    std::vector<float>&              sigma2_vec,
+    std::vector<bart::Forest>&       forests,
+    bart::QuantizedX                 cuts,
+    int n_test)
+{
+    bart::BARTModel m;
+    m.n_samples      = static_cast<int>(forests.size());
+    m.n_test         = n_test;
+    m.forests        = std::move(forests);
+    m.train_cuts     = std::move(cuts);
+    m.sigma2_samples = std::move(sigma2_vec);
+    m.test_samples.resize(static_cast<size_t>(m.n_samples) * m.n_test);
+    for (int s = 0; s < m.n_samples; s++)
+        if (m.n_test > 0)
+            std::copy(test_vecs[s].begin(), test_vecs[s].end(),
+                      m.test_samples.data() + s * m.n_test);
+    return m;
+}
+
+} // anonymous namespace
+
+bart::BARTModel fit_xbart_gpu(const float* X, const float* y, int n, int p,
+                              const float* X_test, int n_test,
+                              const bart::BARTConfig& cfg,
+                              int n_burnin, int n_samples, int seed)
+{
+    MetalContext gpu_ctx;
+    if (!gpu_ctx.ok())
+        throw std::runtime_error("Metal GPU not available on this system.");
+
+    bart::RNG rng(static_cast<unsigned>(seed));
+
+    bart::BARTState state;
+    state.n  = n;
+    state.p  = p;
+    state.Xq = bart::quantize(X, n, p);
+    state.y  = y;
+    bart::init_state(state, cfg, rng);
+    state.gfr_hist_ws.alloc(n, p, state.trees[0].full_size);
+
+    bart::QuantizedX test_qx;
+    if (n_test > 0 && X_test)
+        test_qx = bart::quantize_with_cuts(X_test, n_test, state.Xq);
+
+    for (int s = 0; s < n_burnin; s++)
+        gfr_sweep_gpu(state, cfg, rng, gpu_ctx);
+
+    std::vector<std::vector<float>> test_vecs;
+    std::vector<float>              sigma2_vec;
+    std::vector<bart::Forest>       forests;
+    test_vecs.reserve(n_samples);
+    sigma2_vec.reserve(n_samples);
+    forests.reserve(n_samples);
+
+    for (int s = 0; s < n_samples; s++) {
+        gfr_sweep_gpu(state, cfg, rng, gpu_ctx);
+
+        if (n_test > 0) {
+            std::vector<float> test_pred(n_test, 0.f);
+            for (int t = 0; t < cfg.num_trees; t++)
+                for (int i = 0; i < n_test; i++)
+                    test_pred[i] += state.trees[t].leaf_value[
+                        state.trees[t].traverse(test_qx.data.data(), i, n_test)];
+            test_vecs.push_back(std::move(test_pred));
+        }
+
+        sigma2_vec.push_back(state.sigma2);
+        forests.push_back(state.trees);
+    }
+
+    bart::QuantizedX cuts = state.Xq;
+    cuts.data.clear();
+    return assemble_bart_model(test_vecs, sigma2_vec, forests, std::move(cuts), n_test);
+}
+
+bart::BARTModel fit_warmstart_bart_gpu(const float* X, const float* y, int n, int p,
+                                       const float* X_test, int n_test,
+                                       const bart::BARTConfig& cfg,
+                                       int n_gfr_burnin, int n_mcmc_burnin,
+                                       int n_samples, int seed,
+                                       bool keep_gfr_samples)
+{
+    MetalContext gpu_ctx;
+    if (!gpu_ctx.ok())
+        throw std::runtime_error("Metal GPU not available on this system.");
+
+    bart::RNG rng(static_cast<unsigned>(seed));
+
+    bart::BARTState state;
+    state.n  = n;
+    state.p  = p;
+    state.Xq = bart::quantize(X, n, p);
+    state.y  = y;
+    bart::init_state(state, cfg, rng);
+    state.gfr_hist_ws.alloc(n, p, state.trees[0].full_size);
+
+    bart::QuantizedX test_qx;
+    if (n_test > 0 && X_test)
+        test_qx = bart::quantize_with_cuts(X_test, n_test, state.Xq);
+
+    std::vector<std::vector<float>> test_vecs;
+    std::vector<float>              sigma2_vec;
+    std::vector<bart::Forest>       forests;
+    int total = n_samples + (keep_gfr_samples ? n_gfr_burnin : 0);
+    test_vecs.reserve(total);
+    sigma2_vec.reserve(total);
+    forests.reserve(total);
+
+    auto collect = [&]() {
+        if (n_test > 0) {
+            std::vector<float> test_pred(n_test, 0.f);
+            for (int t = 0; t < cfg.num_trees; t++)
+                for (int i = 0; i < n_test; i++)
+                    test_pred[i] += state.trees[t].leaf_value[
+                        state.trees[t].traverse(test_qx.data.data(), i, n_test)];
+            test_vecs.push_back(std::move(test_pred));
+        }
+        sigma2_vec.push_back(state.sigma2);
+        forests.push_back(state.trees);
+    };
+
+    for (int s = 0; s < n_gfr_burnin; s++) {
+        gfr_sweep_gpu(state, cfg, rng, gpu_ctx);
+        if (keep_gfr_samples) collect();
+    }
+
+    for (int s = 0; s < n_mcmc_burnin; s++)
+        bart::mcmc_sweep(state, cfg, rng);
+
+    for (int s = 0; s < n_samples; s++) {
+        bart::mcmc_sweep(state, cfg, rng);
+        collect();
+    }
+
+    bart::QuantizedX cuts = state.Xq;
+    cuts.data.clear();
+    return assemble_bart_model(test_vecs, sigma2_vec, forests, std::move(cuts), n_test);
 }
 
 } // namespace gpu

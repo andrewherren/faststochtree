@@ -1,6 +1,7 @@
 #pragma once
 #include "faststochtree/model.hpp"
 #include "faststochtree/rng.hpp"
+#include "faststochtree/sampler.hpp"
 #include "MetalContext.h"
 
 namespace gpu {
@@ -17,5 +18,21 @@ void grow_tree_gfr_gpu(bart::Tree& tree, const bart::QuantizedX& Xq,
 // Drop-in for bart::gfr_sweep (single-forest, constant leaf, no thread pool).
 void gfr_sweep_gpu(bart::BARTState& state, const bart::BARTConfig& cfg,
                    bart::RNG& rng, MetalContext& gpu_ctx);
+
+// High-level fit functions — same signature as bart::fit_xbart / bart::fit_warmstart_bart
+// but run all GFR sweeps on the GPU. Constructs MetalContext internally.
+// Throws std::runtime_error if Metal is unavailable (non-macOS build).
+// Restrictions: cfg.p_eval must be 0 (full feature set); constant leaf only (no z).
+bart::BARTModel fit_xbart_gpu(const float* X, const float* y, int n, int p,
+                               const float* X_test, int n_test,
+                               const bart::BARTConfig& cfg,
+                               int n_burnin, int n_samples, int seed);
+
+bart::BARTModel fit_warmstart_bart_gpu(const float* X, const float* y, int n, int p,
+                                        const float* X_test, int n_test,
+                                        const bart::BARTConfig& cfg,
+                                        int n_gfr_burnin, int n_mcmc_burnin,
+                                        int n_samples, int seed,
+                                        bool keep_gfr_samples = false);
 
 } // namespace gpu

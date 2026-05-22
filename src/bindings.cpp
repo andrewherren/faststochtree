@@ -1,6 +1,11 @@
 #include "cpp11.hpp"
 #include "faststochtree/sampler.hpp"
+#include <stdexcept>
 #include <vector>
+
+#ifdef GPU_METAL
+#include "GFRAccel.h"
+#endif
 
 using namespace cpp11;
 
@@ -90,6 +95,7 @@ external_pointer<bart::BARTModel> fit_xbart_cpp(
         doubles_matrix<> X, doubles y,
         doubles_matrix<> X_test,
         int n_burnin, int n_samples, int seed,
+        bool use_gpu,
         list config) {
 
     bart::BARTConfig cfg = bart_config_from_list(config);
@@ -99,6 +105,18 @@ external_pointer<bart::BARTModel> fit_xbart_cpp(
 
     int n      = X.nrow(), p = X.ncol();
     int n_test = X_test.nrow();
+
+    if (use_gpu) {
+#ifdef GPU_METAL
+        auto* m = new bart::BARTModel(
+            gpu::fit_xbart_gpu(Xf.data(), yf.data(), n, p,
+                               Xtf.data(), n_test, cfg,
+                               n_burnin, n_samples, seed));
+        return external_pointer<bart::BARTModel>(m, &bart_model_finalizer);
+#else
+        cpp11::stop("gpu=TRUE requires a macOS build with Metal support (GPU_METAL=ON).");
+#endif
+    }
 
     auto* m = new bart::BARTModel(
         bart::fit_xbart(Xf.data(), yf.data(), n, p,
@@ -114,7 +132,7 @@ external_pointer<bart::BARTModel> fit_warmstart_bart_cpp(
         doubles_matrix<> X, doubles y,
         doubles_matrix<> X_test,
         int n_gfr_burnin, int n_mcmc_burnin, int n_samples, int seed,
-        bool keep_gfr_samples,
+        bool keep_gfr_samples, bool use_gpu,
         list config) {
 
     bart::BARTConfig cfg = bart_config_from_list(config);
@@ -124,6 +142,19 @@ external_pointer<bart::BARTModel> fit_warmstart_bart_cpp(
 
     int n      = X.nrow(), p = X.ncol();
     int n_test = X_test.nrow();
+
+    if (use_gpu) {
+#ifdef GPU_METAL
+        auto* m = new bart::BARTModel(
+            gpu::fit_warmstart_bart_gpu(Xf.data(), yf.data(), n, p,
+                                        Xtf.data(), n_test, cfg,
+                                        n_gfr_burnin, n_mcmc_burnin, n_samples,
+                                        seed, keep_gfr_samples));
+        return external_pointer<bart::BARTModel>(m, &bart_model_finalizer);
+#else
+        cpp11::stop("gpu=TRUE requires a macOS build with Metal support (GPU_METAL=ON).");
+#endif
+    }
 
     auto* m = new bart::BARTModel(
         bart::fit_warmstart_bart(Xf.data(), yf.data(), n, p,

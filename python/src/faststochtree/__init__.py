@@ -60,14 +60,15 @@ def fit_bart(X, y, X_test, n_burnin: int = 200, n_samples: int = 1000,
 
 
 def fit_xbart(X, y, X_test, n_burnin: int = 15, n_samples: int = 25,
-              seed: int = 42, config: BARTConfig = None) -> BARTModel:
+              seed: int = 42, gpu: bool = False,
+              config: BARTConfig = None) -> BARTModel:
     if config is None:
         config = BARTConfig()
     y_scaled, y_mean, y_sd = _scale_y(y)
     if config.leaf_prior_var < 0.0:
-      config.leaf_prior_var = 1.0 / config.num_trees
+        config.leaf_prior_var = 1.0 / config.num_trees
     return BARTModel(
-        _fit_xbart(X, y_scaled, X_test, n_burnin, n_samples, seed, config),
+        _fit_xbart(X, y_scaled, X_test, n_burnin, n_samples, seed, gpu, config),
         y_mean, y_sd)
 
 
@@ -76,6 +77,7 @@ def fit_warmstart_bart(X, y, X_test,
                        n_samples: int = 200,
                        seed: int = 42,
                        keep_gfr_samples: bool = False,
+                       gpu: bool = False,
                        config: BARTConfig = None) -> BARTModel:
     if config is None:
         config = BARTConfig()
@@ -85,7 +87,7 @@ def fit_warmstart_bart(X, y, X_test,
     return BARTModel(
         _fit_warmstart_bart(X, y_scaled, X_test,
                              n_gfr_burnin, n_mcmc_burnin, n_samples,
-                             seed, keep_gfr_samples, config),
+                             seed, keep_gfr_samples, gpu, config),
         y_mean, y_sd)
 
 

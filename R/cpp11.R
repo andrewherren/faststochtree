@@ -4,12 +4,12 @@ fit_bart_cpp <- function(X, y, X_test, n_burnin, n_samples, seed, config) {
   .Call(`_faststochtree_fit_bart_cpp`, X, y, X_test, n_burnin, n_samples, seed, config)
 }
 
-fit_xbart_cpp <- function(X, y, X_test, n_burnin, n_samples, seed, config) {
-  .Call(`_faststochtree_fit_xbart_cpp`, X, y, X_test, n_burnin, n_samples, seed, config)
+fit_xbart_cpp <- function(X, y, X_test, n_burnin, n_samples, seed, use_gpu, config) {
+  .Call(`_faststochtree_fit_xbart_cpp`, X, y, X_test, n_burnin, n_samples, seed, use_gpu, config)
 }
 
-fit_warmstart_bart_cpp <- function(X, y, X_test, n_gfr_burnin, n_mcmc_burnin, n_samples, seed, keep_gfr_samples, config) {
-  .Call(`_faststochtree_fit_warmstart_bart_cpp`, X, y, X_test, n_gfr_burnin, n_mcmc_burnin, n_samples, seed, keep_gfr_samples, config)
+fit_warmstart_bart_cpp <- function(X, y, X_test, n_gfr_burnin, n_mcmc_burnin, n_samples, seed, keep_gfr_samples, use_gpu, config) {
+  .Call(`_faststochtree_fit_warmstart_bart_cpp`, X, y, X_test, n_gfr_burnin, n_mcmc_burnin, n_samples, seed, keep_gfr_samples, use_gpu, config)
 }
 
 predict_cpp <- function(model, X_new) {

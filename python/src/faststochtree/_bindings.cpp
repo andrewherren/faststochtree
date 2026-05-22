@@ -3,6 +3,10 @@
 #include <pybind11/stl.h>
 #include "faststochtree/sampler.hpp"
 
+#ifdef GPU_METAL
+#include "GFRAccel.h"
+#endif
+
 namespace py = pybind11;
 
 // Convert a 2-D numpy array (any float dtype, any layout) to a contiguous
@@ -97,7 +101,7 @@ PYBIND11_MODULE(_faststochtree, m) {
         [](py::array X_raw, py::array_t<float> y_raw,
            py::array X_test_raw,
            int n_gfr_burnin, int n_mcmc_burnin, int n_samples, int seed,
-           bool keep_gfr_samples,
+           bool keep_gfr_samples, bool gpu,
            const bart::BARTConfig& cfg) {
 
             auto [X_arr, X_ptr]     = to_float32_rowmajor(X_raw);
@@ -113,6 +117,18 @@ PYBIND11_MODULE(_faststochtree, m) {
             int p = static_cast<int>(Xbuf.shape[1]);
             int n_test = static_cast<int>(Xtbuf.shape[0]);
 
+            if (gpu) {
+#ifdef GPU_METAL
+                return std::make_unique<bart::BARTModel>(
+                    gpu::fit_warmstart_bart_gpu(X_ptr, y_arr.data(), n, p,
+                                                Xt_ptr, n_test, cfg,
+                                                n_gfr_burnin, n_mcmc_burnin, n_samples,
+                                                seed, keep_gfr_samples));
+#else
+                throw std::runtime_error(
+                    "gpu=True requires building with -DGPU_METAL=ON (macOS + Metal only).");
+#endif
+            }
             return std::make_unique<bart::BARTModel>(
                 bart::fit_warmstart_bart(X_ptr, y_arr.data(), n, p,
                                           Xt_ptr, n_test, cfg,
@@ -124,6 +140,7 @@ PYBIND11_MODULE(_faststochtree, m) {
         py::arg("n_samples") = 200,
         py::arg("seed") = 42,
         py::arg("keep_gfr_samples") = false,
+        py::arg("gpu") = false,
         py::arg("config") = bart::BARTConfig{});
 
     // ── fit_xbart ─────────────────────────────────────────────────────────────
@@ -131,6 +148,7 @@ PYBIND11_MODULE(_faststochtree, m) {
         [](py::array X_raw, py::array_t<float> y_raw,
            py::array X_test_raw,
            int n_burnin, int n_samples, int seed,
+           bool gpu,
            const bart::BARTConfig& cfg) {
 
             auto [X_arr, X_ptr]     = to_float32_rowmajor(X_raw);
@@ -146,6 +164,16 @@ PYBIND11_MODULE(_faststochtree, m) {
             int p = static_cast<int>(Xbuf.shape[1]);
             int n_test = static_cast<int>(Xtbuf.shape[0]);
 
+            if (gpu) {
+#ifdef GPU_METAL
+                return std::make_unique<bart::BARTModel>(
+                    gpu::fit_xbart_gpu(X_ptr, y_arr.data(), n, p,
+                                       Xt_ptr, n_test, cfg, n_burnin, n_samples, seed));
+#else
+                throw std::runtime_error(
+                    "gpu=True requires building with -DGPU_METAL=ON (macOS + Metal only).");
+#endif
+            }
             return std::make_unique<bart::BARTModel>(
                 bart::fit_xbart(X_ptr, y_arr.data(), n, p,
                                 Xt_ptr, n_test, cfg,
@@ -154,6 +182,7 @@ PYBIND11_MODULE(_faststochtree, m) {
         py::arg("X"), py::arg("y"), py::arg("X_test"),
         py::arg("n_burnin") = 15, py::arg("n_samples") = 25,
         py::arg("seed") = 42,
+        py::arg("gpu") = false,
         py::arg("config") = bart::BARTConfig{});
 
     // ── BCFConfig ─────────────────────────────────────────────────────────────

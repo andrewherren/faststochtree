@@ -74,6 +74,7 @@ fit_bart <- function(X, y, X_test,
 #' @param n_burnin    Number of GFR burn-in sweeps (default 15)
 #' @param n_samples   Number of GFR samples to retain (default 25)
 #' @param seed        Integer random seed (default 42)
+#' @param gpu         Use Metal GPU acceleration (macOS only; default FALSE)
 #' @param config      Named list from bart_config() (optional; overrides num_threads)
 #' @return A BARTModel object
 #' @export
@@ -81,6 +82,7 @@ fit_xbart <- function(X, y, X_test,
                       n_burnin    = 15L,
                       n_samples   = 25L,
                       seed        = 42L,
+                      gpu         = FALSE,
                       config      = bart_config()) {
   sc <- .scale_y(y)
   if (config$leaf_prior_var < 0) {
@@ -88,7 +90,7 @@ fit_xbart <- function(X, y, X_test,
   }
   ptr <- fit_xbart_cpp(as.matrix(X), sc$y_scaled, as.matrix(X_test),
                        as.integer(n_burnin), as.integer(n_samples),
-                       as.integer(seed), config)
+                       as.integer(seed), as.logical(gpu), config)
   structure(list(ptr = ptr, y_mean = sc$y_mean, y_sd = sc$y_sd), class = "BARTModel")
 }
 
@@ -102,6 +104,7 @@ fit_xbart <- function(X, y, X_test,
 #' @param n_samples      Number of MCMC posterior samples to retain (default 200)
 #' @param seed           Integer random seed (default 42)
 #' @param keep_gfr_samples If TRUE, prepend GFR burn-in draws to the result (default FALSE)
+#' @param gpu            Use Metal GPU acceleration for GFR phase (macOS only; default FALSE)
 #' @param config         Named list from bart_config()
 #' @return A BARTModel object
 #' @export
@@ -111,6 +114,7 @@ fit_warmstart_bart <- function(X, y, X_test,
                                 n_samples        = 200L,
                                 seed             = 42L,
                                 keep_gfr_samples = FALSE,
+                                gpu              = FALSE,
                                 config           = bart_config()) {
   sc <- .scale_y(y)
   if (config$leaf_prior_var < 0) {
@@ -119,7 +123,7 @@ fit_warmstart_bart <- function(X, y, X_test,
   ptr <- fit_warmstart_bart_cpp(as.matrix(X), sc$y_scaled, as.matrix(X_test),
                                  as.integer(n_gfr_burnin), as.integer(n_mcmc_burnin),
                                  as.integer(n_samples), as.integer(seed),
-                                 as.logical(keep_gfr_samples), config)
+                                 as.logical(keep_gfr_samples), as.logical(gpu), config)
   structure(list(ptr = ptr, y_mean = sc$y_mean, y_sd = sc$y_sd), class = "BARTModel")
 }
 

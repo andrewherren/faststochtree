@@ -11,5 +11,5 @@ requires-python = ">=3.9"
 [tool.scikit-build]
 cmake.source-dir = ".."
 cmake.build-type = "Release"
-cmake.args = ["-DBUILD_PYTHON_BINDINGS=ON"]
+cmake.args = ["-DBUILD_PYTHON_BINDINGS=ON", "-DGPU_METAL=ON"]
 wheel.packages = ["src/faststochtree"]

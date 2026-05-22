@@ -67,5 +67,20 @@ if(BUILD_PYTHON_BINDINGS)
     pybind11_add_module(_faststochtree
         python/src/faststochtree/_bindings.cpp)
     target_link_libraries(_faststochtree PRIVATE faststochtree)
+    target_include_directories(_faststochtree PRIVATE .)
+
+    if(GPU_METAL)
+        find_library(METAL_LIB     Metal      REQUIRED)
+        find_library(FOUNDATION_LIB Foundation REQUIRED)
+        target_sources(_faststochtree PRIVATE
+            gpu/MetalContext.mm
+            gpu/GFRAccel.cpp)
+        set_source_files_properties(gpu/MetalContext.mm PROPERTIES
+            COMPILE_FLAGS "-x objective-c++")
+        target_compile_definitions(_faststochtree PRIVATE GPU_METAL)
+        target_include_directories(_faststochtree PRIVATE gpu)
+        target_link_libraries(_faststochtree PRIVATE ${METAL_LIB} ${FOUNDATION_LIB})
+    endif()
+
     install(TARGETS _faststochtree DESTINATION faststochtree)
 endif()
