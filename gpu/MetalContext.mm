@@ -43,6 +43,12 @@ kernel void noop(uint id                  [[thread_position_in_grid]],
 
 constant uint HIST_TG_SIZE = 64;  // must divide 256 evenly (4 bins per thread)
 
+// Shared helper used by scan_feat_log_total.
+inline float leaf_log_ml(float sum_y, float n, float sigma2, float tau) {
+    return -0.5f * log(1.0f + tau * n / sigma2)
+           + (tau * sum_y * sum_y) / (2.0f * sigma2 * (n * tau + sigma2));
+}
+
 inline void tg_atomic_add_float(threadgroup atomic_uint* addr, float val) {
     uint cur = atomic_load_explicit(addr, memory_order_relaxed);
     uint next;
@@ -104,6 +110,62 @@ kernel void histogram_build(
             atomic_load_explicit(&cnt[b], memory_order_relaxed);
     }
 }
+// --- scan_feat_log_total -------------------------------------------------------
+//
+// Second compute pass, run in the same MTLCommandBuffer as histogram_build.
+// The implicit GPU barrier between compute encoders guarantees histogram writes
+// are visible before this kernel reads them — no explicit fence needed.
+//
+// One thread per (feature, node): walks bins 0..254 of that feature's histogram
+// in order, accumulates sum_L/count_L as a prefix scan, and computes the
+// online log-sum-exp over all valid split points.
+//
+// Grid: threadgroups = (p, n_nodes, 1), threadsPerThreadgroup = (1, 1, 1).
+// The GPU packs independent single-thread threadgroups into SIMD groups
+// automatically, achieving parallelism across (feat, node) pairs.
+//
+// Output: feat_log[node * p + feat]
+
+kernel void scan_feat_log_total(
+    device const float* sum_hists [[buffer(0)]],  // [n_nodes * p * 256]
+    device const int*   cnt_hists [[buffer(1)]],  // [n_nodes * p * 256]
+    device       float* feat_log  [[buffer(2)]],  // [n_nodes * p]
+    constant     float& sigma2    [[buffer(3)]],
+    constant     float& tau       [[buffer(4)]],
+    constant     int&   min_leaf  [[buffer(5)]],
+    constant     int&   p_total   [[buffer(6)]],
+    uint2 tg_pos [[threadgroup_position_in_grid]]
+) {
+    const uint feat = tg_pos.x;
+    const uint node = tg_pos.y;
+
+    const uint base = (node * (uint)p_total + feat) * 256u;
+    const device float* sh = sum_hists + base;
+    const device int*   ch = cnt_hists + base;
+
+    // Compute node totals from this feature's 256-bin histogram.
+    // Every feature's histogram sums to the same node total, so this is
+    // redundant across features but trivially parallelisable.
+    float sum_T = 0.f; int count_T = 0;
+    for (uint b = 0u; b < 256u; b++) { sum_T += sh[b]; count_T += ch[b]; }
+
+    // Prefix scan with online log-sum-exp over valid split points.
+    float sum_L = 0.f; int count_L = 0;
+    float max_lw = -INFINITY, lse = 0.f;
+
+    for (uint b = 0u; b < 255u; b++) {
+        if (ch[b] == 0) continue;
+        sum_L   += sh[b]; count_L += ch[b];
+        int count_R = count_T - count_L;
+        if (count_L < min_leaf || count_R < min_leaf) continue;
+        float lml = leaf_log_ml(sum_L,          float(count_L), sigma2, tau)
+                  + leaf_log_ml(sum_T - sum_L,  float(count_R), sigma2, tau);
+        if (lml > max_lw) { lse = lse * exp(max_lw - lml) + 1.f; max_lw = lml; }
+        else                 lse += exp(lml - max_lw);
+    }
+
+    feat_log[node * (uint)p_total + feat] = (lse > 0.f) ? (max_lw + log(lse)) : -INFINITY;
+}
 )MSL";
 // ---------------------------------------------------------------------------
 
@@ -115,6 +177,7 @@ struct MetalContext::Impl {
     id<MTLLibrary>              library  = nil;
     id<MTLComputePipelineState> noop_pso = nil;
     id<MTLComputePipelineState> hist_pso = nil;
+    id<MTLComputePipelineState> scan_pso = nil;
     std::string                 name;
 };
 
@@ -154,12 +217,13 @@ MetalContext::MetalContext() : impl_(new Impl()) {
 
     impl_->noop_pso = make_pso("noop");
     impl_->hist_pso = make_pso("histogram_build");
+    impl_->scan_pso = make_pso("scan_feat_log_total");
 }
 
 MetalContext::~MetalContext() { delete impl_; }
 
 bool MetalContext::ok() const {
-    return impl_ && impl_->device && impl_->noop_pso && impl_->hist_pso;
+    return impl_ && impl_->device && impl_->noop_pso && impl_->hist_pso && impl_->scan_pso;
 }
 
 const char* MetalContext::device_name() const {
@@ -257,6 +321,94 @@ MetalContext::HistResult MetalContext::histogram_build(
         memcpy(out_sum, [buf_sum contents], (size_t)out_elems * sizeof(float));
     if (out_cnt)
         memcpy(out_cnt, [buf_cnt contents], (size_t)out_elems * sizeof(int));
+
+    return res;
+}
+
+MetalContext::HistResult MetalContext::histogram_and_scan(
+    const uint8_t* Xq, const float* resid,
+    const int* obs_list, int obs_count, const int* node_ranges,
+    int n, int p, int n_nodes,
+    float sigma2, float tau, int min_samples_leaf,
+    float* out_sum, int* out_cnt, float* out_feat_log)
+{
+    HistResult res;
+    if (!impl_ || !impl_->hist_pso || !impl_->scan_pso) return res;
+
+    auto shared_buf_from = [&](const void* src, size_t bytes) {
+        return [impl_->device newBufferWithBytes:src
+                               length:bytes
+                               options:MTLResourceStorageModeShared];
+    };
+
+    id<MTLBuffer> buf_Xq     = shared_buf_from(Xq,         (size_t)n * p       * sizeof(uint8_t));
+    id<MTLBuffer> buf_resid  = shared_buf_from(resid,       (size_t)n           * sizeof(float));
+    id<MTLBuffer> buf_obs    = shared_buf_from(obs_list,    (size_t)obs_count   * sizeof(int));
+    id<MTLBuffer> buf_ranges = shared_buf_from(node_ranges, (size_t)n_nodes * 2 * sizeof(int));
+
+    const int hist_elems = n_nodes * p * 256;
+    const int log_elems  = n_nodes * p;
+
+    id<MTLBuffer> buf_sum = [impl_->device
+        newBufferWithLength:(size_t)hist_elems * sizeof(float)
+        options:MTLResourceStorageModeShared];
+    id<MTLBuffer> buf_cnt = [impl_->device
+        newBufferWithLength:(size_t)hist_elems * sizeof(int)
+        options:MTLResourceStorageModeShared];
+    id<MTLBuffer> buf_log = [impl_->device
+        newBufferWithLength:(size_t)log_elems * sizeof(float)
+        options:MTLResourceStorageModeShared];
+
+    // ---- begin timed region ----
+    auto host_t0 = std::chrono::high_resolution_clock::now();
+
+    id<MTLCommandBuffer> cmd = [impl_->queue commandBuffer];
+
+    // Pass 1: histogram_build
+    {
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        [enc setComputePipelineState:impl_->hist_pso];
+        [enc setBuffer:buf_Xq     offset:0 atIndex:0];
+        [enc setBuffer:buf_resid  offset:0 atIndex:1];
+        [enc setBuffer:buf_obs    offset:0 atIndex:2];
+        [enc setBuffer:buf_ranges offset:0 atIndex:3];
+        [enc setBuffer:buf_sum    offset:0 atIndex:4];
+        [enc setBuffer:buf_cnt    offset:0 atIndex:5];
+        [enc setBytes:&n          length:sizeof(int) atIndex:6];
+        [enc setBytes:&p          length:sizeof(int) atIndex:7];
+        [enc dispatchThreadgroups:MTLSizeMake(p, n_nodes, 1)
+           threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        [enc endEncoding];  // implicit GPU barrier: scan pass waits for histogram writes
+    }
+
+    // Pass 2: scan_feat_log_total (reads buf_sum/buf_cnt written by pass 1)
+    {
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        [enc setComputePipelineState:impl_->scan_pso];
+        [enc setBuffer:buf_sum    offset:0 atIndex:0];
+        [enc setBuffer:buf_cnt    offset:0 atIndex:1];
+        [enc setBuffer:buf_log    offset:0 atIndex:2];
+        [enc setBytes:&sigma2          length:sizeof(float) atIndex:3];
+        [enc setBytes:&tau             length:sizeof(float) atIndex:4];
+        [enc setBytes:&min_samples_leaf length:sizeof(int)  atIndex:5];
+        [enc setBytes:&p               length:sizeof(int)   atIndex:6];
+        [enc dispatchThreadgroups:MTLSizeMake(p, n_nodes, 1)
+           threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        [enc endEncoding];
+    }
+
+    [cmd commit];
+    [cmd waitUntilCompleted];
+
+    auto host_t1 = std::chrono::high_resolution_clock::now();
+    // ---- end timed region ----
+
+    res.gpu_kernel_us = (cmd.GPUEndTime - cmd.GPUStartTime) * 1e6;
+    res.host_us = std::chrono::duration<double, std::micro>(host_t1 - host_t0).count();
+
+    if (out_sum)      memcpy(out_sum,      [buf_sum contents], (size_t)hist_elems * sizeof(float));
+    if (out_cnt)      memcpy(out_cnt,      [buf_cnt contents], (size_t)hist_elems * sizeof(int));
+    if (out_feat_log) memcpy(out_feat_log, [buf_log contents], (size_t)log_elems  * sizeof(float));
 
     return res;
 }

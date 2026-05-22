@@ -40,6 +40,7 @@ void grow_tree_gfr_gpu(bart::Tree& tree, const bart::QuantizedX& Xq,
 
     std::vector<float> gpu_sum;
     std::vector<int>   gpu_cnt;
+    std::vector<float> gpu_feat_log;
 
     std::vector<int> current_level = {1};
 
@@ -79,13 +80,16 @@ void grow_tree_gfr_gpu(bart::Tree& tree, const bart::QuantizedX& Xq,
         }
         gpu_sum.resize((size_t)n_active * p * 256);
         gpu_cnt.resize((size_t)n_active * p * 256);
+        gpu_feat_log.resize((size_t)n_active * p);
 
-        // obs_count = n: flat_obs spans [0,n), ranges index into it absolutely.
-        gpu_ctx.histogram_build(
+        // Two-pass dispatch: histogram then scan in one MTLCommandBuffer.
+        // obs_count = n so flat_obs ranges index into the full array absolutely.
+        gpu_ctx.histogram_and_scan(
             Xq.data.data(), resid,
             ws.flat_obs.data(), n,
             node_ranges_buf.data(), n, p, n_active,
-            gpu_sum.data(), gpu_cnt.data());
+            sigma2, cfg.leaf_prior_var, cfg.min_samples_leaf,
+            gpu_sum.data(), gpu_cnt.data(), gpu_feat_log.data());
 
         // Per-node: CPU scan over GPU histograms + stage1/stage2/partition.
         for (int ai = 0; ai < n_active; ai++) {
@@ -107,26 +111,10 @@ void grow_tree_gfr_gpu(bart::Tree& tree, const bart::QuantizedX& Xq,
             p_split = std::min(p_split, 1.f - 1e-6f);
             float log_split_ratio = std::log(p_split) - std::log(1.f - p_split);
 
-            for (int fi = 0; fi <= m; fi++) ws.feat_log_total[fi] = NEG_INF;
-
-            // Prefix scan over each feature's GPU histogram.
-            for (int fi = 0; fi < m; fi++) {
-                const float* sh = node_sum + fi * 256;
-                const int*   ch = node_cnt + fi * 256;
-                float sum_L = 0.f; int count_L = 0;
-                float max_lw = NEG_INF, sum_exp = 0.f;
-                for (int b = 0; b < 255; b++) {
-                    if (ch[b] == 0) continue;
-                    sum_L   += sh[b]; count_L += ch[b];
-                    int count_R = count_T - count_L;
-                    if (count_L < cfg.min_samples_leaf || count_R < cfg.min_samples_leaf) continue;
-                    float log_ml = bart::leaf_log_ml(sum_L,           (float)count_L, sigma2, cfg.leaf_prior_var)
-                                 + bart::leaf_log_ml(sum_T - sum_L,   (float)count_R, sigma2, cfg.leaf_prior_var);
-                    if (log_ml > max_lw) { sum_exp = sum_exp * std::exp(max_lw - log_ml) + 1.f; max_lw = log_ml; }
-                    else                   sum_exp += std::exp(log_ml - max_lw);
-                }
-                if (sum_exp > 0.f) ws.feat_log_total[fi] = max_lw + std::log(sum_exp);
-            }
+            // feat_log_total[0..m-1] already computed by the GPU scan kernel.
+            const float* node_feat_log = gpu_feat_log.data() + ai * p;
+            for (int fi = 0; fi < m; fi++)
+                ws.feat_log_total[fi] = node_feat_log[fi];
 
             // Stage 1: softmax over features + no-split option.
             int n_valid_feats = 0;

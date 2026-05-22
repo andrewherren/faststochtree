@@ -48,6 +48,22 @@ struct MetalContext {
                                int n, int p, int n_nodes,
                                float* out_sum, int* out_cnt);
 
+    // Two-pass variant: histogram_build followed by scan_feat_log_total in one
+    // MTLCommandBuffer. The implicit GPU barrier between compute encoders
+    // guarantees histogram writes are visible to the scan pass.
+    //
+    // sigma2, tau, min_samples_leaf: GFR split-scoring parameters for the scan.
+    // out_feat_log [n_nodes * p]: log-sum-exp over valid split log-weights per
+    //   (node, feature) pair. Layout: out_feat_log[node * p + feat].
+    // gpu_kernel_us covers both passes combined.
+    HistResult histogram_and_scan(const uint8_t* Xq, const float* resid,
+                                  const int* obs_list, int obs_count,
+                                  const int* node_ranges,
+                                  int n, int p, int n_nodes,
+                                  float sigma2, float tau, int min_samples_leaf,
+                                  float* out_sum, int* out_cnt,
+                                  float* out_feat_log);
+
     struct Impl;
     Impl* impl_ = nullptr;
 };
