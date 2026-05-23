@@ -132,6 +132,148 @@ kernel void histogram_build(
 //
 // Output: feat_log[node * p + feat]
 
+// --- select_split -------------------------------------------------------------
+//
+// One thread per active node.  Reads feat_log (output of scan_feat_log_total)
+// and the raw sum/count histograms to sample (feature, cutpoint) from the GFR
+// split posterior using two-stage softmax.
+//
+// Stage 1: softmax over m feature-slots + 1 no-split option.
+// Stage 2: softmax over valid cutpoints in the chosen feature's histogram.
+//
+// Uses xorshift32 RNG seeded per node by the CPU; state must be nonzero.
+//
+// Output layout: out_feat[ai] = actual column index (or -1 for leaf),
+//                out_thresh[ai] = quantile bin (uint8).
+
+inline uint xorshift32(thread uint& state) {
+    state ^= state << 13u;
+    state ^= state >> 17u;
+    state ^= state << 5u;
+    return state;
+}
+
+inline float xor_uniform(thread uint& state) {
+    return float(xorshift32(state)) * (1.0f / 4294967296.0f);
+}
+
+kernel void select_split(
+    device const float*   feat_log        [[buffer(0)]],   // [n_active * m]
+    device const float*   sum_hists       [[buffer(1)]],   // [n_active * m * 256]
+    device const int*     cnt_hists       [[buffer(2)]],   // [n_active * m * 256]
+    device const float*   log_split_ratio [[buffer(3)]],   // [n_active]
+    device const uint*    rng_seeds       [[buffer(4)]],   // [n_active], nonzero
+    device       int*     out_feat        [[buffer(5)]],   // [n_active]: actual col or -1
+    device       uint8_t* out_thresh      [[buffer(6)]],   // [n_active]: chosen bin
+    constant     float&   sigma2          [[buffer(7)]],
+    constant     float&   tau             [[buffer(8)]],
+    constant     int&     min_leaf        [[buffer(9)]],
+    constant     int&     m_total         [[buffer(10)]],
+    device const int*     feat_order      [[buffer(11)]],  // [n_active * m] or nil
+    uint ai [[thread_position_in_grid]]
+) {
+    uint rng = rng_seeds[ai];
+    const int m = m_total;
+
+    // sum_T / count_T from slot-0 histogram (all slots have same marginal total).
+    const device float* slot0_sum = sum_hists + (int)ai * m * 256;
+    const device int*   slot0_cnt = cnt_hists  + (int)ai * m * 256;
+    float sum_T = 0.f; int count_T = 0;
+    for (int b = 0; b < 256; b++) { sum_T += slot0_sum[b]; count_T += slot0_cnt[b]; }
+
+    const device float* node_fl = feat_log + (int)ai * m;
+
+    int n_valid = 0;
+    for (int fi = 0; fi < m; fi++)
+        if (node_fl[fi] > -INFINITY) n_valid++;
+
+    float lsr = log_split_ratio[ai];
+    float no_split_lw = leaf_log_ml(sum_T, float(count_T), sigma2, tau)
+                        - lsr
+                        + (n_valid > 0 ? log(float(n_valid)) : 0.f);
+
+    // Stage 1: softmax over (feat_log[0..m-1], no_split_lw).
+    float max_ft = no_split_lw;
+    for (int fi = 0; fi < m; fi++)
+        if (node_fl[fi] > max_ft) max_ft = node_fl[fi];
+
+    float total_ft = exp(no_split_lw - max_ft);
+    for (int fi = 0; fi < m; fi++)
+        if (node_fl[fi] > -INFINITY) total_ft += exp(node_fl[fi] - max_ft);
+
+    float u1  = xor_uniform(rng);
+    float cum1 = 0.f;
+    int chosen_fi = m;  // default = no-split
+    for (int fi = 0; fi < m; fi++) {
+        if (node_fl[fi] > -INFINITY) cum1 += exp(node_fl[fi] - max_ft);
+        if (u1 * total_ft <= cum1) { chosen_fi = fi; break; }
+    }
+
+    if (chosen_fi == m) {
+        out_feat[ai]   = -1;
+        out_thresh[ai] = 0;
+        return;
+    }
+
+    int chosen_feat = (feat_order != nullptr) ? feat_order[(int)ai * m + chosen_fi] : chosen_fi;
+
+    // Stage 2: cutpoint softmax over bins 0..254 of the chosen feature slot.
+    const device float* sh = sum_hists + ((int)ai * m + chosen_fi) * 256;
+    const device int*   ch = cnt_hists  + ((int)ai * m + chosen_fi) * 256;
+
+    // Pass 1: compute log-sum-exp over valid splits for normalisation.
+    float sum_L = 0.f; int count_L = 0;
+    float max_lw2 = -INFINITY, lse2 = 0.f;
+    int n_valid_cuts = 0;
+    uint8_t last_thresh = 0;
+
+    for (int b = 0; b < 255; b++) {
+        if (ch[b] == 0) continue;
+        sum_L += sh[b]; count_L += ch[b];
+        int count_R = count_T - count_L;
+        if (count_L < min_leaf || count_R < min_leaf) continue;
+        float lw = leaf_log_ml(sum_L,          float(count_L), sigma2, tau)
+                 + leaf_log_ml(sum_T - sum_L,  float(count_R), sigma2, tau);
+        if (lw > max_lw2) { lse2 = lse2 * exp(max_lw2 - lw) + 1.f; max_lw2 = lw; }
+        else                lse2 += exp(lw - max_lw2);
+        n_valid_cuts++;
+        last_thresh = (uint8_t)b;
+    }
+
+    if (n_valid_cuts == 0) {
+        out_feat[ai]   = -1;
+        out_thresh[ai] = 0;
+        return;
+    }
+
+    // Pass 2: CDF walk; default to last valid cut (matches CPU fallback).
+    float u2  = xor_uniform(rng);
+    float target2 = u2 * lse2;
+    sum_L = 0.f; count_L = 0;
+    float cum2 = 0.f;
+    uint8_t chosen_thresh = last_thresh;
+    bool found = false;
+
+    for (int b = 0; b < 255; b++) {
+        if (ch[b] == 0) continue;
+        sum_L += sh[b]; count_L += ch[b];
+        int count_R = count_T - count_L;
+        if (count_L < min_leaf || count_R < min_leaf) continue;
+        float lw = leaf_log_ml(sum_L,          float(count_L), sigma2, tau)
+                 + leaf_log_ml(sum_T - sum_L,  float(count_R), sigma2, tau);
+        cum2 += exp(lw - max_lw2);
+        if (!found && target2 <= cum2) {
+            chosen_thresh = (uint8_t)b;
+            found = true;
+        }
+    }
+
+    out_feat[ai]   = chosen_feat;
+    out_thresh[ai] = chosen_thresh;
+}
+
+// --- scan_feat_log_total -------------------------------------------------------
+
 kernel void scan_feat_log_total(
     device const float* sum_hists [[buffer(0)]],  // [n_nodes * m * 256]
     device const int*   cnt_hists [[buffer(1)]],  // [n_nodes * m * 256]
@@ -179,9 +321,10 @@ struct MetalContext::Impl {
     id<MTLDevice>               device   = nil;
     id<MTLCommandQueue>         queue    = nil;
     id<MTLLibrary>              library  = nil;
-    id<MTLComputePipelineState> noop_pso = nil;
-    id<MTLComputePipelineState> hist_pso = nil;
-    id<MTLComputePipelineState> scan_pso = nil;
+    id<MTLComputePipelineState> noop_pso   = nil;
+    id<MTLComputePipelineState> hist_pso   = nil;
+    id<MTLComputePipelineState> scan_pso   = nil;
+    id<MTLComputePipelineState> select_pso = nil;
     std::string                 name;
 
     // Persistent shared buffers — grown on demand, never shrunk.
@@ -235,15 +378,17 @@ MetalContext::MetalContext() : impl_(new Impl()) {
         return pso;
     };
 
-    impl_->noop_pso = make_pso("noop");
-    impl_->hist_pso = make_pso("histogram_build");
-    impl_->scan_pso = make_pso("scan_feat_log_total");
+    impl_->noop_pso   = make_pso("noop");
+    impl_->hist_pso   = make_pso("histogram_build");
+    impl_->scan_pso   = make_pso("scan_feat_log_total");
+    impl_->select_pso = make_pso("select_split");
 }
 
 MetalContext::~MetalContext() { delete impl_; }
 
 bool MetalContext::ok() const {
-    return impl_ && impl_->device && impl_->noop_pso && impl_->hist_pso && impl_->scan_pso;
+    return impl_ && impl_->device && impl_->noop_pso && impl_->hist_pso
+        && impl_->scan_pso && impl_->select_pso;
 }
 
 const char* MetalContext::device_name() const {
@@ -440,6 +585,66 @@ MetalContext::HistResult MetalContext::histogram_and_scan(
     if (out_feat_log) memcpy(out_feat_log, [buf_log contents], (size_t)log_elems  * sizeof(float));
 
     return res;
+}
+
+void MetalContext::select_splits(const float* feat_log,
+                                 const float* sum_hists, const int* cnt_hists,
+                                 const float* log_split_ratio,
+                                 const unsigned* rng_seeds,
+                                 int n_active, int m,
+                                 float sigma2, float tau, int min_leaf,
+                                 const int* feat_order,
+                                 SplitResult* out)
+{
+    if (!impl_ || !impl_->select_pso || n_active == 0) return;
+
+    auto fill_shared = [&](const void* src, size_t bytes) {
+        return [impl_->device newBufferWithBytes:src length:bytes
+                               options:MTLResourceStorageModeShared];
+    };
+    auto new_shared = [&](size_t bytes) {
+        return [impl_->device newBufferWithLength:bytes
+                               options:MTLResourceStorageModeShared];
+    };
+
+    id<MTLBuffer> buf_fl  = fill_shared(feat_log,        (size_t)n_active * m       * sizeof(float));
+    id<MTLBuffer> buf_sum = fill_shared(sum_hists,       (size_t)n_active * m * 256 * sizeof(float));
+    id<MTLBuffer> buf_cnt = fill_shared(cnt_hists,       (size_t)n_active * m * 256 * sizeof(int));
+    id<MTLBuffer> buf_lsr = fill_shared(log_split_ratio, (size_t)n_active           * sizeof(float));
+    id<MTLBuffer> buf_rng = fill_shared(rng_seeds,       (size_t)n_active           * sizeof(unsigned));
+    id<MTLBuffer> buf_ofe = new_shared( (size_t)n_active                            * sizeof(int));
+    id<MTLBuffer> buf_oth = new_shared( (size_t)n_active                            * sizeof(uint8_t));
+    id<MTLBuffer> buf_fo  = feat_order
+        ? fill_shared(feat_order, (size_t)n_active * m * sizeof(int))
+        : nil;
+
+    id<MTLCommandBuffer>         cmd = [impl_->queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    [enc setComputePipelineState:impl_->select_pso];
+    [enc setBuffer:buf_fl  offset:0 atIndex:0];
+    [enc setBuffer:buf_sum offset:0 atIndex:1];
+    [enc setBuffer:buf_cnt offset:0 atIndex:2];
+    [enc setBuffer:buf_lsr offset:0 atIndex:3];
+    [enc setBuffer:buf_rng offset:0 atIndex:4];
+    [enc setBuffer:buf_ofe offset:0 atIndex:5];
+    [enc setBuffer:buf_oth offset:0 atIndex:6];
+    [enc setBytes:&sigma2   length:sizeof(float) atIndex:7];
+    [enc setBytes:&tau      length:sizeof(float) atIndex:8];
+    [enc setBytes:&min_leaf length:sizeof(int)   atIndex:9];
+    [enc setBytes:&m        length:sizeof(int)   atIndex:10];
+    [enc setBuffer:buf_fo  offset:0 atIndex:11];
+    [enc dispatchThreads:MTLSizeMake((NSUInteger)n_active, 1, 1)
+       threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    [enc endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+
+    const int*     raw_feat   = static_cast<const int*>    ([buf_ofe contents]);
+    const uint8_t* raw_thresh = static_cast<const uint8_t*>([buf_oth contents]);
+    for (int ai = 0; ai < n_active; ai++) {
+        out[ai].feat   = raw_feat[ai];
+        out[ai].thresh = raw_thresh[ai];
+    }
 }
 
 } // namespace gpu

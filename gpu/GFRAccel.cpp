@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
-#include <limits>
 #include <numeric>
 #include <stdexcept>
 #include <vector>
@@ -38,13 +37,14 @@ void grow_tree_gfr_gpu(bart::Tree& tree, const bart::QuantizedX& Xq,
     ws.reinit(n);
     const int m = (cfg.p_eval > 0 && cfg.p_eval < p) ? cfg.p_eval : p;
 
-    const float NEG_INF = -std::numeric_limits<float>::infinity();
-
-    std::vector<float> gpu_sum;
-    std::vector<int>   gpu_cnt;
-    std::vector<float> gpu_feat_log;
-    std::vector<int>   node_feat_orders;  // [n_active * m] per BFS level
-    std::vector<int>   feat_idx(p);       // Fisher-Yates workspace
+    std::vector<float>    gpu_sum;
+    std::vector<int>      gpu_cnt;
+    std::vector<float>    gpu_feat_log;
+    std::vector<int>      node_feat_orders;  // [n_active * m] per BFS level
+    std::vector<int>      feat_idx(p);       // Fisher-Yates workspace
+    std::vector<float>    log_split_ratio_buf;
+    std::vector<unsigned> rng_seeds_buf;
+    std::vector<MetalContext::SplitResult> split_results;
 
     std::vector<int> current_level = {1};
 
@@ -90,7 +90,7 @@ void grow_tree_gfr_gpu(bart::Tree& tree, const bart::QuantizedX& Xq,
             for (int ai = 0; ai < n_active; ai++) {
                 std::iota(feat_idx.begin(), feat_idx.end(), 0);
                 for (int k = 0; k < m; k++) {
-                    int j = k + rng.randint(0, p - k);  // swap position k with [k, p)
+                    int j = k + rng.randint(0, p - k);
                     std::swap(feat_idx[k], feat_idx[j]);
                 }
                 std::copy(feat_idx.begin(), feat_idx.begin() + m,
@@ -99,12 +99,22 @@ void grow_tree_gfr_gpu(bart::Tree& tree, const bart::QuantizedX& Xq,
             feat_order_ptr = node_feat_orders.data();
         }
 
+        // Per-node log_split_ratio and xorshift32 seeds — computed before dispatch
+        // so the GPU can sample without any CPU round-trip in between.
+        log_split_ratio_buf.resize(n_active);
+        rng_seeds_buf.resize(n_active);
+        for (int ai = 0; ai < n_active; ai++) {
+            int depth = bart::Tree::depth_of(active[ai].node_k);
+            float p_split = cfg.alpha / std::pow(1.f + depth, cfg.beta);
+            p_split = std::min(p_split, 1.f - 1e-6f);
+            log_split_ratio_buf[ai] = std::log(p_split) - std::log(1.f - p_split);
+            rng_seeds_buf[ai] = static_cast<unsigned>(rng.randint(0, INT_MAX)) + 1u;
+        }
+
         gpu_sum.resize((size_t)n_active * m * 256);
         gpu_cnt.resize((size_t)n_active * m * 256);
         gpu_feat_log.resize((size_t)n_active * m);
 
-        // Two-pass dispatch: histogram then scan in one MTLCommandBuffer.
-        // obs_count = n so flat_obs ranges index into the full array absolutely.
         gpu_ctx.histogram_and_scan(
             Xq.data.data(), resid,
             ws.flat_obs.data(), n,
@@ -113,103 +123,38 @@ void grow_tree_gfr_gpu(bart::Tree& tree, const bart::QuantizedX& Xq,
             sigma2, cfg.leaf_prior_var, cfg.min_samples_leaf,
             gpu_sum.data(), gpu_cnt.data(), gpu_feat_log.data());
 
-        // Per-node: CPU scan over GPU histograms + stage1/stage2/partition.
+        split_results.resize(n_active);
+        gpu_ctx.select_splits(
+            gpu_feat_log.data(),
+            gpu_sum.data(), gpu_cnt.data(),
+            log_split_ratio_buf.data(), rng_seeds_buf.data(),
+            n_active, m,
+            sigma2, cfg.leaf_prior_var, cfg.min_samples_leaf,
+            feat_order_ptr,
+            split_results.data());
+
+        // Per-node: use GPU sampling decision; CPU obs partition (unchanged).
         for (int ai = 0; ai < n_active; ai++) {
             int node_k = active[ai].node_k;
             int beg    = active[ai].beg;
             int end    = active[ai].end;
-            int depth  = bart::Tree::depth_of(node_k);
 
-            const float* node_sum = gpu_sum.data() + (size_t)ai * m * 256;
-            const int*   node_cnt = gpu_cnt.data() + (size_t)ai * m * 256;
-
-            // Derive sum_T / count_T from feature slot 0's histogram (Σ bins = node total).
-            float sum_T = 0.f; int count_T = 0;
-            for (int b = 0; b < 256; b++) { sum_T += node_sum[b]; count_T += node_cnt[b]; }
-
-            bart::RNG local_rng(rng.randint(0, INT_MAX));
-
-            float p_split = cfg.alpha / std::pow(1.f + depth, cfg.beta);
-            p_split = std::min(p_split, 1.f - 1e-6f);
-            float log_split_ratio = std::log(p_split) - std::log(1.f - p_split);
-
-            // feat_log_total[0..m-1] already computed by the GPU scan kernel.
-            const float* node_feat_log = gpu_feat_log.data() + ai * m;
-            for (int fi = 0; fi < m; fi++)
-                ws.feat_log_total[fi] = node_feat_log[fi];
-
-            // Stage 1: softmax over features + no-split option.
-            int n_valid_feats = 0;
-            for (int fi = 0; fi < m; fi++)
-                if (ws.feat_log_total[fi] > NEG_INF) n_valid_feats++;
-
-            ws.feat_log_total[m] =
-                bart::leaf_log_ml(sum_T, (float)count_T, sigma2, cfg.leaf_prior_var)
-                - log_split_ratio
-                + (n_valid_feats > 0 ? std::log((float)n_valid_feats) : 0.f);
-
-            float max_ft = *std::max_element(ws.feat_log_total.data(), ws.feat_log_total.data() + m + 1);
-            float total_ft = 0.f;
-            for (int fi = 0; fi <= m; fi++) total_ft += std::exp(ws.feat_log_total[fi] - max_ft);
-            float u1 = local_rng.uniform() * total_ft, cum1 = 0.f;
-            int chosen_fi = m;
-            for (int fi = 0; fi < m; fi++) {
-                cum1 += std::exp(ws.feat_log_total[fi] - max_ft);
-                if (u1 <= cum1) { chosen_fi = fi; break; }
-            }
-            if (chosen_fi == m) {
-                ws.leaf_segs.push_back({node_k, beg, end});
-                ws.node_range[node_k].first = -1;
-                continue;
-            }
-            // Map feature slot → actual column (identity when m == p).
-            int chosen_feat = (m < p) ? node_feat_orders[ai * m + chosen_fi] : chosen_fi;
-
-            // Stage 2: cutpoint softmax over chosen feature slot's GPU histogram.
-            ws.cut_log_wts.clear();
-            ws.cut_thresh_buf.clear();
-            {
-                const float* sh = node_sum + chosen_fi * 256;
-                const int*   ch = node_cnt + chosen_fi * 256;
-                float sum_L = 0.f; int count_L = 0;
-                for (int b = 0; b < 255; b++) {
-                    if (ch[b] == 0) continue;
-                    sum_L   += sh[b]; count_L += ch[b];
-                    int count_R = count_T - count_L;
-                    if (count_L < cfg.min_samples_leaf || count_R < cfg.min_samples_leaf) continue;
-                    float log_ml = bart::leaf_log_ml(sum_L,           (float)count_L, sigma2, cfg.leaf_prior_var)
-                                 + bart::leaf_log_ml(sum_T - sum_L,   (float)count_R, sigma2, cfg.leaf_prior_var);
-                    ws.cut_log_wts.push_back(log_ml);
-                    ws.cut_thresh_buf.push_back((uint8_t)b);
-                }
-            }
-            if (ws.cut_thresh_buf.empty()) {
+            const MetalContext::SplitResult& sr = split_results[ai];
+            if (sr.feat == -1) {
                 ws.leaf_segs.push_back({node_k, beg, end});
                 ws.node_range[node_k].first = -1;
                 continue;
             }
 
-            float max_lw2 = *std::max_element(ws.cut_log_wts.begin(), ws.cut_log_wts.end());
-            float total_ct = 0.f;
-            for (float lw : ws.cut_log_wts) total_ct += std::exp(lw - max_lw2);
-            float u2 = local_rng.uniform() * total_ct, cum2 = 0.f;
-            int chosen_cut = (int)ws.cut_thresh_buf.size() - 1;
-            for (int k = 0; k < (int)ws.cut_thresh_buf.size() - 1; k++) {
-                cum2 += std::exp(ws.cut_log_wts[k] - max_lw2);
-                if (u2 <= cum2) { chosen_cut = k; break; }
-            }
-            uint8_t thresh = ws.cut_thresh_buf[chosen_cut];
+            tree.grow(node_k, sr.feat, sr.thresh);
 
-            tree.grow(node_k, chosen_feat, thresh);
-
-            // Partition obs using the actual feature column.
-            const uint8_t* col = Xq.data.data() + chosen_feat * Xq.n;
+            const uint8_t* col = Xq.data.data() + sr.feat * Xq.n;
             ws.right_buf.clear();
             int write = beg;
             for (int k = beg; k < end; k++) {
                 int ob = ws.flat_obs[k];
-                if (col[ob] <= thresh) ws.flat_obs[write++] = ob;
-                else                   ws.right_buf.push_back(ob);
+                if (col[ob] <= sr.thresh) ws.flat_obs[write++] = ob;
+                else                      ws.right_buf.push_back(ob);
             }
             int left_end = write;
             for (int ob : ws.right_buf) ws.flat_obs[write++] = ob;

@@ -67,6 +67,31 @@ struct MetalContext {
                                   float* out_sum, int* out_cnt,
                                   float* out_feat_log);
 
+    // Split sampling decision for one active node.
+    struct SplitResult {
+        int     feat;    // -1 = no-split (node becomes a leaf)
+        uint8_t thresh;  // quantile bin for the chosen cutpoint
+    };
+
+    // For each active node (0..n_active-1), sample (feat, thresh) on the GPU
+    // from the GFR two-stage split posterior.
+    //
+    // feat_log        [n_active * m]       output of scan_feat_log_total
+    // sum_hists       [n_active * m * 256] raw sum histograms
+    // cnt_hists       [n_active * m * 256] raw count histograms
+    // log_split_ratio [n_active]           log(p_split / (1-p_split)) per node
+    // rng_seeds       [n_active]           nonzero xorshift32 seeds (one per node)
+    // feat_order      [n_active * m] or nullptr when m == p
+    // out             [n_active]           written split decisions
+    void select_splits(const float* feat_log,
+                       const float* sum_hists, const int* cnt_hists,
+                       const float* log_split_ratio,
+                       const unsigned* rng_seeds,
+                       int n_active, int m,
+                       float sigma2, float tau, int min_leaf,
+                       const int* feat_order,
+                       SplitResult* out);
+
     struct Impl;
     Impl* impl_ = nullptr;
 };
