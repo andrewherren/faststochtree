@@ -587,6 +587,115 @@ MetalContext::HistResult MetalContext::histogram_and_scan(
     return res;
 }
 
+void MetalContext::histogram_scan_select(
+    const uint8_t* Xq, const float* resid,
+    const int* obs_list, int obs_count, const int* node_ranges,
+    int n, int p, int n_nodes, int m, const int* feat_order,
+    float sigma2, float tau, int min_samples_leaf,
+    const float* log_split_ratio, const unsigned* rng_seeds,
+    SplitResult* out)
+{
+    if (!impl_ || !impl_->hist_pso || !impl_->scan_pso || !impl_->select_pso) return;
+    if (n_nodes == 0) return;
+
+    auto fill_shared = [&](const void* src, size_t bytes) {
+        return [impl_->device newBufferWithBytes:src length:bytes
+                               options:MTLResourceStorageModeShared];
+    };
+    auto new_shared = [&](size_t bytes) {
+        return [impl_->device newBufferWithLength:bytes
+                               options:MTLResourceStorageModeShared];
+    };
+
+    id<MTLBuffer> buf_Xq    = fill_shared(Xq,      (size_t)n * p       * sizeof(uint8_t));
+    id<MTLBuffer> buf_resid = fill_shared(resid,    (size_t)n           * sizeof(float));
+    id<MTLBuffer> buf_obs   = fill_shared(obs_list, (size_t)obs_count   * sizeof(int));
+    id<MTLBuffer> buf_ranges = impl_->ensure(impl_->buf_ranges, impl_->buf_ranges_cap,
+                                             node_ranges, (size_t)n_nodes * 2 * sizeof(int));
+    id<MTLBuffer> buf_fo = feat_order
+        ? impl_->ensure(impl_->buf_fo, impl_->buf_fo_cap,
+                        feat_order, (size_t)n_nodes * m * sizeof(int))
+        : nil;
+    id<MTLBuffer> buf_lsr = fill_shared(log_split_ratio, (size_t)n_nodes * sizeof(float));
+    id<MTLBuffer> buf_rng = fill_shared(rng_seeds,       (size_t)n_nodes * sizeof(unsigned));
+
+    const int hist_elems = n_nodes * m * 256;
+    const int log_elems  = n_nodes * m;
+
+    id<MTLBuffer> buf_sum = new_shared((size_t)hist_elems * sizeof(float));
+    id<MTLBuffer> buf_cnt = new_shared((size_t)hist_elems * sizeof(int));
+    id<MTLBuffer> buf_log = new_shared((size_t)log_elems  * sizeof(float));
+    id<MTLBuffer> buf_ofe = new_shared((size_t)n_nodes    * sizeof(int));
+    id<MTLBuffer> buf_oth = new_shared((size_t)n_nodes    * sizeof(uint8_t));
+
+    id<MTLCommandBuffer> cmd = [impl_->queue commandBuffer];
+
+    // Pass 1: histogram_build — one threadgroup per (feature-slot, node).
+    {
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        [enc setComputePipelineState:impl_->hist_pso];
+        [enc setBuffer:buf_Xq     offset:0 atIndex:0];
+        [enc setBuffer:buf_resid  offset:0 atIndex:1];
+        [enc setBuffer:buf_obs    offset:0 atIndex:2];
+        [enc setBuffer:buf_ranges offset:0 atIndex:3];
+        [enc setBuffer:buf_sum    offset:0 atIndex:4];
+        [enc setBuffer:buf_cnt    offset:0 atIndex:5];
+        [enc setBytes:&n          length:sizeof(int) atIndex:6];
+        [enc setBytes:&m          length:sizeof(int) atIndex:7];
+        [enc setBuffer:buf_fo     offset:0 atIndex:8];
+        [enc dispatchThreadgroups:MTLSizeMake(m, n_nodes, 1)
+           threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        [enc endEncoding];  // implicit GPU barrier: passes 2 and 3 wait for buf_sum/buf_cnt
+    }
+
+    // Pass 2: scan_feat_log_total — one thread per (feature-slot, node).
+    {
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        [enc setComputePipelineState:impl_->scan_pso];
+        [enc setBuffer:buf_sum          offset:0 atIndex:0];
+        [enc setBuffer:buf_cnt          offset:0 atIndex:1];
+        [enc setBuffer:buf_log          offset:0 atIndex:2];
+        [enc setBytes:&sigma2           length:sizeof(float) atIndex:3];
+        [enc setBytes:&tau              length:sizeof(float) atIndex:4];
+        [enc setBytes:&min_samples_leaf length:sizeof(int)   atIndex:5];
+        [enc setBytes:&m                length:sizeof(int)   atIndex:6];
+        [enc dispatchThreadgroups:MTLSizeMake(m, n_nodes, 1)
+           threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        [enc endEncoding];  // implicit GPU barrier: pass 3 waits for buf_log
+    }
+
+    // Pass 3: select_split — one thread per active node.
+    {
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        [enc setComputePipelineState:impl_->select_pso];
+        [enc setBuffer:buf_log          offset:0 atIndex:0];
+        [enc setBuffer:buf_sum          offset:0 atIndex:1];
+        [enc setBuffer:buf_cnt          offset:0 atIndex:2];
+        [enc setBuffer:buf_lsr          offset:0 atIndex:3];
+        [enc setBuffer:buf_rng          offset:0 atIndex:4];
+        [enc setBuffer:buf_ofe          offset:0 atIndex:5];
+        [enc setBuffer:buf_oth          offset:0 atIndex:6];
+        [enc setBytes:&sigma2           length:sizeof(float) atIndex:7];
+        [enc setBytes:&tau              length:sizeof(float) atIndex:8];
+        [enc setBytes:&min_samples_leaf length:sizeof(int)   atIndex:9];
+        [enc setBytes:&m                length:sizeof(int)   atIndex:10];
+        [enc setBuffer:buf_fo           offset:0 atIndex:11];
+        [enc dispatchThreads:MTLSizeMake((NSUInteger)n_nodes, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        [enc endEncoding];
+    }
+
+    [cmd commit];
+    [cmd waitUntilCompleted];
+
+    const int*     raw_feat   = static_cast<const int*>    ([buf_ofe contents]);
+    const uint8_t* raw_thresh = static_cast<const uint8_t*>([buf_oth contents]);
+    for (int ai = 0; ai < n_nodes; ai++) {
+        out[ai].feat   = raw_feat[ai];
+        out[ai].thresh = raw_thresh[ai];
+    }
+}
+
 void MetalContext::select_splits(const float* feat_log,
                                  const float* sum_hists, const int* cnt_hists,
                                  const float* log_split_ratio,

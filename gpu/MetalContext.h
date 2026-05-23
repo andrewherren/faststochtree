@@ -73,6 +73,23 @@ struct MetalContext {
         uint8_t thresh;  // quantile bin for the chosen cutpoint
     };
 
+    // Three-pass fused dispatch: histogram_build → scan_feat_log_total → select_split
+    // in a single MTLCommandBuffer (one commit per BFS level instead of two).
+    //
+    // Inputs/semantics match histogram_and_scan + select_splits combined.
+    // log_split_ratio [n_nodes] and rng_seeds [n_nodes] are the per-node
+    // inputs needed by the select_split pass.
+    // out [n_nodes]: written split decisions (feat=-1 means no-split/leaf).
+    void histogram_scan_select(const uint8_t* Xq, const float* resid,
+                               const int* obs_list, int obs_count,
+                               const int* node_ranges,
+                               int n, int p, int n_nodes, int m,
+                               const int* feat_order,
+                               float sigma2, float tau, int min_samples_leaf,
+                               const float* log_split_ratio,
+                               const unsigned* rng_seeds,
+                               SplitResult* out);
+
     // For each active node (0..n_active-1), sample (feat, thresh) on the GPU
     // from the GFR two-stage split posterior.
     //

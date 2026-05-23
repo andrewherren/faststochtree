@@ -37,11 +37,8 @@ void grow_tree_gfr_gpu(bart::Tree& tree, const bart::QuantizedX& Xq,
     ws.reinit(n);
     const int m = (cfg.p_eval > 0 && cfg.p_eval < p) ? cfg.p_eval : p;
 
-    std::vector<float>    gpu_sum;
-    std::vector<int>      gpu_cnt;
-    std::vector<float>    gpu_feat_log;
-    std::vector<int>      node_feat_orders;  // [n_active * m] per BFS level
-    std::vector<int>      feat_idx(p);       // Fisher-Yates workspace
+    std::vector<int>      node_feat_orders;
+    std::vector<int>      feat_idx(p);
     std::vector<float>    log_split_ratio_buf;
     std::vector<unsigned> rng_seeds_buf;
     std::vector<MetalContext::SplitResult> split_results;
@@ -111,26 +108,14 @@ void grow_tree_gfr_gpu(bart::Tree& tree, const bart::QuantizedX& Xq,
             rng_seeds_buf[ai] = static_cast<unsigned>(rng.randint(0, INT_MAX)) + 1u;
         }
 
-        gpu_sum.resize((size_t)n_active * m * 256);
-        gpu_cnt.resize((size_t)n_active * m * 256);
-        gpu_feat_log.resize((size_t)n_active * m);
-
-        gpu_ctx.histogram_and_scan(
+        split_results.resize(n_active);
+        gpu_ctx.histogram_scan_select(
             Xq.data.data(), resid,
             ws.flat_obs.data(), n,
             node_ranges_buf.data(), n, p, n_active,
             m, feat_order_ptr,
             sigma2, cfg.leaf_prior_var, cfg.min_samples_leaf,
-            gpu_sum.data(), gpu_cnt.data(), gpu_feat_log.data());
-
-        split_results.resize(n_active);
-        gpu_ctx.select_splits(
-            gpu_feat_log.data(),
-            gpu_sum.data(), gpu_cnt.data(),
             log_split_ratio_buf.data(), rng_seeds_buf.data(),
-            n_active, m,
-            sigma2, cfg.leaf_prior_var, cfg.min_samples_leaf,
-            feat_order_ptr,
             split_results.data());
 
         // Per-node: use GPU sampling decision; CPU obs partition (unchanged).
