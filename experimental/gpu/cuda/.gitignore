@@ -1,0 +1,4 @@
+# compiled cuda binaries
+launch_overhead
+grid_barrier
+*.o

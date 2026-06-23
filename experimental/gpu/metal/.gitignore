@@ -1,0 +1,4 @@
+# compiled reprex binaries
+dispatch_overhead
+grid_barrier
+*.o
